@@ -41,13 +41,11 @@ class UTF8Corpus(object):
 
 
 class ExpandConv1d(nn.Module):
-
-    def __init__(self, ):
-
     def forward(self, x):
-        # TODO Reshape
         # Output of conv1d: (N,Cout,Lout)
-        raise NotImplementedError
+        bsz, c, l = x.size()
+        x = x.view(bsz, c // 2, 2, l).transpose(2, 3).contiguous()
+        return x.view(bsz, c // 2, 2 * l).contiguous()
 
 
 class ByteCNNEncoder(nn.Module):
