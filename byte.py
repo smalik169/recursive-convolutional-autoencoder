@@ -13,13 +13,12 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 
-import data
+# import data
 import model
-from logger import Logger
+# from logger import Logger
 
 
 class UTF8File(object):
-
     def __init__(self, path):
         self.lines = [[ord(c) for c in l.strip().encode('utf-8')] \
                       for l in codecs.open(path, 'r', 'utf-8')]
@@ -41,69 +40,90 @@ class UTF8Corpus(object):
 
 
 class ExpandConv1d(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super(ExpandConv1d, self).__init__()
+        self.conv1d = nn.Conv1d(*args, **kwargs)
+
     def forward(self, x):
         # Output of conv1d: (N,Cout,Lout)
+        x = self.conv1d(x)
         bsz, c, l = x.size()
         x = x.view(bsz, c // 2, 2, l).transpose(2, 3).contiguous()
         return x.view(bsz, c // 2, 2 * l).contiguous()
 
 
 class ByteCNNEncoder(nn.Module):
-    save_best = True
-    def __init__(self, n, emsize):
+    def __init__(self, n, emsize=256):
         super(ByteCNNEncoder, self).__init__()
+        conv_block_fun = lambda i: [nn.Conv1d(emsize, emsize, 3, padding=1) \
+                                    for _ in xrange(i)]
+        linear_block = [(nn.Linear(emsize * 4, emsize * 4), nn.ReLU())]
+        linear_block = [l for tupl in linear_block for l in tupl]
+        linear_block.append(nn.Linear(emsize * 4, emsize * 4))
 
         self.n = n
-
-        # Input: LongTensor (N, W), N = mini-batch, W = number of indices to extract per mini-batch
-        # Output: (N, W, embedding_dim)
-        self.embedding = nn.Embedding(num_embeddings, emsize)
-
-        conv_block = lambda n: [nn.Conv1d(256, 256, 3, padding=1) \
-                                for _ in xrange(n)]
-
-        self.prefix = nn.Sequential(*conv_block(n))
-        self.recurrent = nn.Sequential(*conv_block(n))
-        self.recurrent.add_module(nn.Pooling())
-        # TODO Reshape, add ReLUs
-
-        linear_block = lambda n: [nn.Conv1d(256, 256, 3, padding=1) \
-                                  for _ in xrange(n)]
-
-        self.postfix = nn.Sequential(nn.Linear() for _ in range(n))
+        self.embedding = nn.Embedding(256, emsize)
+        self.prefix = nn.Sequential(*conv_block_fun(n))
+        self.recurrent = nn.Sequential(*conv_block_fun(n))
+        self.recurrent.add_module(module=nn.MaxPool1d(kernel_size=2), name='max_pool')
+        self.postfix = nn.Sequential(*linear_block)
 
     def forward(self, x):
-        x = self.embedding(x).t(1, 2)
+        x = self.embedding(x).transpose(1, 2)
         x = self.prefix(x)
 
-        rfloat = np.log(x.size(-1))
-        r = int(r)
+        rfloat = np.log2(x.size(-1))
+        r = int(rfloat)
         assert float(r) == rfloat
 
-        for _ in xrange(r):
-            x = self.recurrent(x)
+        print(r)
 
-        assert x.size(-1) == 1024 # XXX
-        return self.postfix(x)
+        for _ in xrange(r-2):
+            x = self.recurrent(x)
+            print(x.size())
+
+        bsz = x.size(0)
+        return self.postfix(x.view(bsz, -1)), r
 
 
 class ByteCNNDecoder(nn.Module):
-    save_best = True
     def __init__(self, n, emsize):
         super(ByteCNNDecoder, self).__init__()
+        conv_block_fun = lambda i: [nn.Conv1d(emsize, emsize, 3, padding=1) \
+                                    for _ in xrange(i)]
+        linear_block = [(nn.Linear(emsize * 4, emsize * 4), nn.ReLU())]
+        linear_block = [l for tupl in linear_block for l in tupl]
+        linear_block.append(nn.Linear(emsize * 4, emsize * 4))
 
         self.n = n
-        self.embedding = nn.Embedding(num_embeddings, emsize)
+        # self.embedding = nn.Embedding(256, emsize)
+        self.prefix = nn.Sequential(*linear_block)
+        self.recurrent = nn.Sequential(*([ExpandConv1d(emsize, emsize * 2, 3, padding=1)] +\
+                                         conv_block_fun(n)))
+        self.postfix = nn.Sequential(*conv_block_fun(n))
 
-        self.prefix = nn.ModuleList([nn.Linear() for _ in xrange(n)])
-        self.recurrent = nn.ModuleList([nn.Conv1d() for _ in xrange(n)] + [nn.ExpandConv()])
-        self.postfix = nn.ModuleList([nn.Conv1d() for _ in xrange(n)])
+    def forward(self, x, r):
+        # x = self.embedding(x).transpose(1, 2)
+        x = self.prefix(x)
+        x = x.view(x.size(0), 256, 4)
+        print(x.size())
+
+        for _ in xrange(r-2):
+            x = self.recurrent(x)
+            print(x.size())
+        return self.postfix(x)
 
 
-class ByteCNN(nn.module):
-    def __init__(self, ):
-        self.encoder = ByteCNNEncoder()
-        self.decoder = ByteCNNDecoder()
+class ByteCNN(nn.Module):
+    def __init__(self, n, emsize):
+        super(ByteCNN, self).__init__()
+        self.encoder = ByteCNNEncoder(n, emsize)
+        self.decoder = ByteCNNDecoder(n, emsize)
+
+    def forward(self, x):
+        x, r = self.encoder(x)
+        x = self.decoder(x, r-1)
+        return x
 
 
 parser = argparse.ArgumentParser(description='Byte-level CNN text autoencoder.')
