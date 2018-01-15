@@ -5,6 +5,8 @@ import argparse
 import codecs
 import pprint
 import time
+from collections import defaultdict
+from itertools.chain import from_iterable
 
 import numpy as np
 
@@ -19,17 +21,40 @@ import model
 
 
 class UTF8File(object):
-    def __init__(self, path):
-        self.lines = [[ord(c) for c in l.strip().encode('utf-8')] \
-                      for l in codecs.open(path, 'r', 'utf-8')]
+    EOS = 0  # XXX XXX XXX
+    def __init__(self, path, cuda, rng):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
 
+        lines_by_len = defaultdict(list)
+        with codecs.open(path, 'r', 'utf-8') as f:
+            for line in f:
+                bytes_ = [ord(c) for c in line.strip()] + [self.EOS]
+                bytes_ += [0] * (int(2 ** np.ceil(np.log2(len(bytes_)))) - len(bytes_))
+                lines_by_len[len(bytes_)].append(bytes_)
+        # Convert to ndarrays
+        self.lines = {k: np.asarray(v, dtype=np.uint8) \
+                      for k,v in lines_by_len.items()}
+
     def get_num_batches(self, bsz):
-        return self.lines // bsz
+        return sum(arr.shape[0] // bsz for arr in self.lines.values())
 
     def iter_epoch(self, bsz, evaluation=False):
-        return NotImplementedError
+        if evaluation:
+            for len_,data in self.lines.items():
+                for batch in np.split_array(data, data.shape[0] // bsz):
+                    yield batch
+        else:
+            batch_inds = []
+            for len_,data in self.lines.items():
+                num_batches = v.shape[0] // bsz * bsz
+                all_inds = np.random.permutation(data.shape[0])
+                all_inds = all_inds[:(bsz * num_batches)]
+                batch_inds += [(len_,inds) \
+                               for inds in np.split(all_inds, num_batches)]
+            np.shuffle(batch_inds)
+            for len_,inds in batch_inds:
+                yield self.lines[len_][inds]
 
 
 class UTF8Corpus(object):
@@ -52,38 +77,44 @@ class ExpandConv1d(nn.Module):
         return x.view(bsz, c // 2, 2 * l).contiguous()
 
 
+def insert_relu(layer_list, last=True):
+    ret = list(from_iterable(zip(layer_list, [nn.ReLU() for _ in layer_list])))
+    if not last:
+        ret.pop()
+    return ret
+
+
 class ByteCNNEncoder(nn.Module):
     def __init__(self, n, emsize=256):
         super(ByteCNNEncoder, self).__init__()
-        conv_block_fun = lambda i: [nn.Conv1d(emsize, emsize, 3, padding=1) \
-                                    for _ in xrange(i)]
-        linear_block = [(nn.Linear(emsize * 4, emsize * 4), nn.ReLU())]
-        linear_block = [l for tupl in linear_block for l in tupl]
-        linear_block.append(nn.Linear(emsize * 4, emsize * 4))
+        conv_block = lambda i: [nn.Conv1d(emsize, emsize, 3, padding=1) \
+                                for _ in xrange(i)]
+        linear_block = [nn.Linear(emsize * 4, emsize * 4) for _ in xrange(n)]
 
         self.n = n
         self.embedding = nn.Embedding(256, emsize)
-        self.prefix = nn.Sequential(*conv_block_fun(n))
-        self.recurrent = nn.Sequential(*conv_block_fun(n))
-        self.recurrent.add_module(module=nn.MaxPool1d(kernel_size=2), name='max_pool')
-        self.postfix = nn.Sequential(*linear_block)
+        self.prefix = nn.Sequential(*insert_relu(conv_block(n), last=True))
+        self.recurrent = nn.Sequential(*insert_relu(conv_block(n), last=True))
+        self.recurrent.add_module(module=nn.MaxPool1d(kernel_size=2),
+                                  name='max_pool')
+        self.postfix = nn.Sequential(*insert_relu(linear_block, last=False))
 
-    def forward(self, x):
+    def forward(self, x, r):
         x = self.embedding(x).transpose(1, 2)
         x = self.prefix(x)
-
-        rfloat = np.log2(x.size(-1))
-        r = int(rfloat)
-        assert float(r) == rfloat
-
-        print(r)
 
         for _ in xrange(r-2):
             x = self.recurrent(x)
             print(x.size())
 
         bsz = x.size(0)
-        return self.postfix(x.view(bsz, -1)), r
+        return self.postfix(x.view(bsz, -1))
+
+    def num_recurrences(self, x):
+        rfloat = np.log2(x.size(-1))
+        r = int(rfloat)
+        assert float(r) == rfloat
+        return r
 
 
 class ByteCNNDecoder(nn.Module):
@@ -117,33 +148,73 @@ class ByteCNNDecoder(nn.Module):
 class ByteCNN(nn.Module):
     def __init__(self, n, emsize):
         super(ByteCNN, self).__init__()
+        self.n = n
+        self.emsize = emsize
         self.encoder = ByteCNNEncoder(n, emsize)
         self.decoder = ByteCNNDecoder(n, emsize)
+        self.log_softmax = nn.LogSoftmax()
+        self.criterion = nn.NLLLoss()
 
     def forward(self, x):
-        x, r = self.encoder(x)
+        r = self.encoder.num_recurrences(x)
+        x = self.encoder(x, r)
         x = self.decoder(x, r-1)
-        return x
+        return self.log_softmax(x)
+
+    def train_on(self, data_loader, optimizer, logger=None):
+        self.train()
+        losses = []
+        errs = []
+        for batch, (data, targets) in enumerate(data_loader):
+            self.zero_grad()
+            # TODO data = Variable(data.view(data.size(0), -1))
+            # TODO targets = Variable(targets)
+            features = self.encoder(data)
+            text = self.decoder(data)
+            loss = self.criterion(outputs, targets)
+            loss.backward()
+            optimizer.step()
+
+            _, predictions = outputs.data.max(dim=1)
+            err_rate = 100. * (predictions != targets.data).sum() / data.size(0)
+            losses.append(loss.data[0])
+            errs.append(err_rate)
+            logger.train_log(batch, {'acc': 100. - err_rate,}, #loss.data[0]},
+                             named_params=self.named_parameters)
+        return losses, errs
+
+    def eval_on(self, data_loader):
+        self.eval()
+        errs = 0
+        samples = 0
+        total_loss = 0
+        for data, targets in data_loader:
+            # TODO data = Variable(data.view(data.size(0), -1), volatile=True)
+            # TODO targets = Variable(targets, volatile=True)
+            outputs = self(data)
+            total_loss += self.criterion(outputs, targets)
+            _, predictions = outputs.data.max(dim=1)
+            errs += (predictions != targets.data).sum()
+            samples += data.size(0)
+        return {'loss': total_loss.data[0], 'acc': 100 - 100. * errs / samples}
 
 
 parser = argparse.ArgumentParser(description='Byte-level CNN text autoencoder.')
 parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
-# TODO Change to --resume-force-args, which passes dict of input args to be overwritten (e.g., "dict(epochs=42)")
-# parser.add_argument('--resume-epochs', type=int, default=None,
-#                     help='force a number of epochs when loading an experiment')
+parser.add_argument('--resume-training-force-args', type=str, default='',
+                    help='list of input args to be overwritten when resuming (e.g., # of epochs)')
 parser.add_argument('--data', type=str, default='TODO',
                     help='name of the dataset')
 parser.add_argument('--model', type=str, default='ByteCNN',
                     help='model class')
 parser.add_argument('--model-kwargs', type=str, default='',
                     help='model kwargs')
-parser.add_argument('--lr', type=float, default=20,
+parser.add_argument('--lr', type=float, default=0.001,
                     help='initial learning rate')
-parser.add_argument('--lr-lambda', type=str, default=None, # 'lambda lr,it: lr',
+# Default from the Byte-level CNN paper: half lr every 10 epochs
+parser.add_argument('--lr-lambda', type=str, default='lambda epoch: 0.5 ** (epoch // 10)',
                     help='learning rate based on base lr and iteration')
-# parser.add_argument('--clip', type=float, default=0.25,
-#                     help='gradient clipping')
 parser.add_argument('--epochs', type=int, default=40,
                     help='upper epoch limit')
 parser.add_argument('--batch-size', type=int, default=20, metavar='N',
@@ -187,6 +258,8 @@ if args.resume_training != '':
     if args.resume_epochs is not None:
         state['args'].__dict__['epochs'] = args.resume_epochs
     args = state['args']
+
+    # TODO Parse --resume-training-force-args
 
 # Set the random seed manually for reproducibility.
 torch.manual_seed(args.seed)
@@ -246,22 +319,16 @@ if args.resume_training != '':
     model.load_state_dict(logger.load_model_state_dict(current=True))
     first_epoch = logger.epoch + 1
 else:
-    logger = None
+    logger = Logger(optimizer.param_groups[0]['lr'], args.log_interval,
+                    dataset.get_num_batches(args.batch_size), logdir=args.logdir,
+                    log_weights=args.log_weights, log_grads=args.log_grads)
     first_epoch = 1
-
-# Loop over epochs.
-# XXX Save it in training state?
-best_val_loss = None
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:
-    if logger is None:
-        logger = Logger(optimizer.param_groups[0]['lr'], args.log_interval,
-                        dataset.get_num_batches(args.batch_size), logdir=args.logdir,
-                        log_weights=args.log_weights, log_grads=args.log_grads)
-        # XXX
-        # logger.save_model_info(args.model, generator_kwargs,
-        #         args.initializer_class, initializer_kwargs)
+    # TODO If not already saved
+    # logger.save_model_info(args.model, generator_kwargs,
+    #         args.initializer_class, initializer_kwargs)
     print(logger.logdir)
 
     for epoch in range(first_epoch, args.epochs+1):
