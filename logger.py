@@ -90,16 +90,6 @@ class Logger(object):
         self.epoch_start_time = None
         self.training_start_time = None
 
-    # XXX Obsolete
-    def save_model(self, model):
-        with open(self.model_path, 'wb') as f:
-            torch.save(model, f)
-
-    # XXX Obsolete
-    def load_model(self):
-        with open(self.model_path, 'rb') as f:
-            return torch.load(f)
-
     def mark_epoch_start(self, epoch):
         self.epoch = epoch
         self.minibatch_start_time = self.epoch_start_time = time.time()
@@ -152,46 +142,20 @@ class Logger(object):
         state['optimizer'] = optimizer
         return state
 
-    # def log_memory(self, ):
+    def save_model_info(self, classes_with_kwargs):
 
-    #     if not self.writers.has_key('explore'):
-    #         self.writers['explore'] = Writer(self.logdir + 'explore')
+        kwargs_to_str = lambda kwargs: ','.join(
+            ["%s=%s" % (key, str(kw) if type(kw) != str else '\\"%s\\"' % kw) \
+             for key,kw in kwargs.items()])
 
-    #         # Log scalar values
-    #         for tag, value in info.items():
-    #             self.writers[mode].scalar_summary(tag, value, step)
-
-    #     self. mode="train", info=cur_loss, step=step,
-    #                     named_params=named_params)
-
-    def save_model_info(self, model_class, generator_kwargs, 
-            initializer_class, initializer_kwargs=None):
-        info = "model_class=%s\ninitializer_class=%s" % (model_class, initializer_class)
-        
-        info += "\ngenerator_kwargs=%s" % ( 
-                ','.join(["%s=%s" % (
-                    kw, 
-                    str(generator_kwargs[kw]) 
-                    if type(generator_kwargs[kw]) != str 
-                    else '\\"%s\\"' % generator_kwargs[kw]) 
-                    for kw in generator_kwargs]
-                    )
-                )
-
-        if initializer_kwargs:
-            info += "\ninitializer_kwargs=%s" % (
-                    ','.join(["%s=%s" % (
-                        kw, 
-                        str(initializer_kwargs[kw]) 
-                        if type(initializer_kwargs[kw]) != str 
-                        else '\\"%s\\"' % initializer_kwargs[kw]) 
-                        for kw in initializer_kwargs]
-                        )
-                    )
+        info = ""
+        for field, (name, kwargs) in classes_with_kwargs.items():
+            info += "%s_class=%s\n" % (field, name)
+            if kwargs:
+                info += "%s_kwargs=%s\n" % (field, kwargs_to_str(kwargs)) 
 
         with open(self.logdir+"model.info", 'w') as f:
-            f.write(info)
-    
+            f.write(info.strip())
 
     def train_log(self, batch, batch_losses, named_params):
 
