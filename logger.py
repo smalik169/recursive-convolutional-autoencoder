@@ -90,16 +90,6 @@ class Logger(object):
         self.epoch_start_time = None
         self.training_start_time = None
 
-    # XXX Obsolete
-    def save_model(self, model):
-        with open(self.model_path, 'wb') as f:
-            torch.save(model, f)
-
-    # XXX Obsolete
-    def load_model(self):
-        with open(self.model_path, 'rb') as f:
-            return torch.load(f)
-
     def mark_epoch_start(self, epoch):
         self.epoch = epoch
         self.minibatch_start_time = self.epoch_start_time = time.time()
@@ -152,46 +142,20 @@ class Logger(object):
         state['optimizer'] = optimizer
         return state
 
-    # def log_memory(self, ):
+    def save_model_info(self, classes_with_kwargs):
 
-    #     if not self.writers.has_key('explore'):
-    #         self.writers['explore'] = Writer(self.logdir + 'explore')
+        kwargs_to_str = lambda kwargs: ','.join(
+            ["%s=%s" % (key, str(kw) if type(kw) != str else '\\"%s\\"' % kw) \
+             for key,kw in kwargs.items()])
 
-    #         # Log scalar values
-    #         for tag, value in info.items():
-    #             self.writers[mode].scalar_summary(tag, value, step)
-
-    #     self. mode="train", info=cur_loss, step=step,
-    #                     named_params=named_params)
-
-    def save_model_info(self, model_class, generator_kwargs, 
-            initializer_class, initializer_kwargs=None):
-        info = "model_class=%s\ninitializer_class=%s" % (model_class, initializer_class)
-        
-        info += "\ngenerator_kwargs=%s" % ( 
-                ','.join(["%s=%s" % (
-                    kw, 
-                    str(generator_kwargs[kw]) 
-                    if type(generator_kwargs[kw]) != str 
-                    else '\\"%s\\"' % generator_kwargs[kw]) 
-                    for kw in generator_kwargs]
-                    )
-                )
-
-        if initializer_kwargs:
-            info += "\ninitializer_kwargs=%s" % (
-                    ','.join(["%s=%s" % (
-                        kw, 
-                        str(initializer_kwargs[kw]) 
-                        if type(initializer_kwargs[kw]) != str 
-                        else '\\"%s\\"' % initializer_kwargs[kw]) 
-                        for kw in initializer_kwargs]
-                        )
-                    )
+        info = ""
+        for field, (name, kwargs) in classes_with_kwargs.items():
+            info += "%s_class=%s\n" % (field, name)
+            if kwargs:
+                info += "%s_kwargs=%s\n" % (field, kwargs_to_str(kwargs)) 
 
         with open(self.logdir+"model.info", 'w') as f:
-            f.write(info)
-    
+            f.write(info.strip())
 
     def train_log(self, batch, batch_losses, named_params):
 
@@ -258,27 +222,27 @@ class Logger(object):
         # self.writers[mode].flush()
 
     def final_log(self, results, result_file="results/log_file.md"):
-        for losses in results.values():
-            losses['pplx'] = np.exp(losses['nll_per_w'])
+        #for losses in results.values():
+        #    losses['pplx'] = np.exp(losses['nll_per_w'])
 
-        log_line = ('| End of training | test losses {} | test pplx {:5.2f}'
-                    ''.format(results['test'], results['test']['pplx']))
+        log_line = ('| End of training | test losses {} |'
+                    ''.format(results['test']))
         print('=' * len(log_line))
         print(log_line)
         print('=' * len(log_line))
 
-        header =  "|timestamp|args|train pplx|valid pplx|test pplx|other|\n"
-        header += "|---------|----|----------|----------|---------|-----|\n"
+        header =  "|timestamp|args|train acc|valid acc|test acc|other|\n"
+        header += "|---------|----|---------|---------|--------|-----|\n"
 
 	if not results.has_key('train') or not results.has_key('valid'):
             log_line = "| %s | %s | not_evald | not_evald | %.2f | %s |\n" % (
                 self.timestamp, '<br>'.join(sys.argv[1:]),
-                results['test']['pplx'], results)
+                results['test']['acc'], results)
 	else:
             log_line = "| %s | %s | %.2f | %.2f | %.2f | %s |\n" % (
                 self.timestamp, '<br>'.join(sys.argv[1:]),
-                results['train']['pplx'], results['valid']['pplx'],
-                results['test']['pplx'], results)
+                results['train']['acc'], results['valid']['pplx'],
+                results['test']['acc'], results)
 
         with open(self.logdir+"results.md", 'w') as f:
             f.write(header + log_line)
