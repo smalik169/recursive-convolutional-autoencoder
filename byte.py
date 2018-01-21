@@ -65,6 +65,7 @@ args = parser.parse_args()
 
 class UTF8File(object):
     EOS = 256  # XXX XXX XXX additional non-a-byte symbol
+    ZERO = 256
     def __init__(self, path, cuda, rng=None):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
@@ -73,7 +74,7 @@ class UTF8File(object):
         with codecs.open(path, 'r', 'utf-8') as f:
             for line in f:
                 bytes_ = [ord(c) for c in line.strip()] + [self.EOS]
-                bytes_ += [self.EOS] * (int(2 ** np.ceil(np.log2(len(bytes_)))) - len(bytes_))
+                bytes_ += [self.ZERO] * (int(2 ** np.ceil(np.log2(len(bytes_)))) - len(bytes_))
                 lines_by_len[len(bytes_)].append(bytes_)
         # Convert to ndarrays
         self.lines = {k: np.asarray(v, dtype=np.uint8) \
@@ -283,17 +284,19 @@ if args.resume_training != '':
     # a proper random seed (which will later get overwritten)
     resume_path = args.resume_training
     print('\nResuming training of %s' % resume_path)
-    print('\nWarning: Ignoring other input arguments!\n')
     state = Logger.load_training_state(resume_path)
     state['args'].__dict__['resume_training'] = resume_path # XXX
-    if args.resume_epochs is not None:
-        state['args'].__dict__['epochs'] = args.resume_epochs
-    args = state['args']
 
     if args.resume_training_force_args != '':
-        print('\nForcing args: %s' % args.resume_training_force_args)
         forced_args = eval('dict(%s)' % args.resume_training_force_args)
-        args.update(forced_args)
+        print('\nForcing args: %s' % forced_args)
+        print('\nWarning: Some args (e.g., --lr) will be ignored. '
+              'Some loaded components, as the optimizer, are already constructed.')
+        for k,v in forced_args.items():
+            assert hasattr(state['args'], k)
+            setattr(state['args'], k, v)
+    args = state['args']
+    print('\nWarning: Ignoring other input arguments!\n')
 
 # Set the random seed manually for reproducibility.
 torch.manual_seed(args.seed)
@@ -340,6 +343,7 @@ optimizer = optimizer_proto[args.optimizer](
     model.parameters(), **optimizer_kwargs)
 
 if args.lr_lambda:
+    # TODO Check how it behaves on resuming training
     lr_decay = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda=eval(args.lr_lambda))
 else:
