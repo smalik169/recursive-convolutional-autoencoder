@@ -22,7 +22,7 @@ parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
 parser.add_argument('--resume-training-force-args', type=str, default='',
                     help='list of input args to be overwritten when resuming (e.g., # of epochs)')
-parser.add_argument('--data', type=str, default='TODO',
+parser.add_argument('--data', type=str, default='/pio/data/data/mikolov_simple_examples/data/ptb.', #TODO
                     help='name of the dataset')
 parser.add_argument('--model', type=str, default='ByteCNN',
                     help='model class')
@@ -139,21 +139,45 @@ class ByteCNNEncoder(nn.Module):
 
         self.n = n
         self.embedding = nn.Embedding(emsize, emsize)
-        self.prefix = nn.Sequential(*insert_relu(conv_block(n), last=True))
-        self.recurrent = nn.Sequential(*insert_relu(conv_block(n), last=True))
-        self.recurrent.add_module(module=nn.MaxPool1d(kernel_size=2),
-                                  name='max_pool')
-        self.postfix = nn.Sequential(*insert_relu(linear_block, last=False))
+        #self.prefix = nn.Sequential(*insert_relu(conv_block(n), last=True))
+        #self.recurrent = nn.Sequential(*insert_relu(conv_block(n), last=True))
+        #self.recurrent.add_module(module=nn.MaxPool1d(kernel_size=2),
+        #                          name='max_pool')
+        #self.postfix = nn.Sequential(*insert_relu(linear_block, last=False))
+
+        self.prefix_group = nn.ModuleList(conv_block(n))
+        self.recurrent_group = nn.ModuleList(conv_block(n))
+        self.postfix_group = nn.ModuleList(linear_block)
+
+        self.max_pool = nn.MaxPool1d(kernel_size=2)
+        self.relu = nn.ReLU()
 
     def forward(self, x, r):
         x = self.embedding(x).transpose(1, 2)
-        x = self.prefix(x)
+
+        x0, x1 = 0, x
+        #x = self.prefix(x)
+        for op in self.prefix_group:
+            x = self.relu(op(x) + x0)
+            x0, x1 = x1, x
 
         for _ in xrange(r-2):
-            x = self.recurrent(x)
+        #    x = self.recurrent(x)
+            x0, x1 = 0, x
+            for op in self.recurrent_group:
+                x = self.relu(op(x) + x0)
+                x0, x1 = x1, x
+            x = self.max_pool(x)
 
         bsz = x.size(0)
-        return self.postfix(x.view(bsz, -1))
+        x = x.view([bsz, -1])
+        x0, x1 = 0, x
+        for op in self.postfix_group:
+            x = self.relu(op(x) + x0)
+            x0, x1 = x1, x
+
+        #return self.postfix(x.view(bsz, -1))
+        return x
 
     def num_recurrences(self, x):
         rfloat = np.log2(x.size(-1))
@@ -173,18 +197,43 @@ class ByteCNNDecoder(nn.Module):
 
         self.n = n
         self.emsize = emsize
-        self.prefix = nn.Sequential(*linear_block)
-        self.recurrent = nn.Sequential(*([ExpandConv1d(emsize, emsize * 2, 3, padding=1)] +\
-                                         conv_block_fun(n)))
-        self.postfix = nn.Sequential(*conv_block_fun(n))
+        #self.prefix = nn.Sequential(*linear_block)
+        #self.recurrent = nn.Sequential(*([ExpandConv1d(emsize, emsize * 2, 3, padding=1)] +\
+        #                                 conv_block_fun(n)))
+        #self.postfix = nn.Sequential(*conv_block_fun(n))
+
+        self.prefix_group = nn.ModuleList(linear_block)
+        self.recurrent_group = nn.ModuleList(conv_block_fun(n-1))
+        self.postfix_group = nn.ModuleList(conv_block_fun(n))
+
+        self.expand_conv = ExpandConv1d(emsize, emsize * 2, 3, padding=1)
+        self.relu = nn.ReLU()
+
 
     def forward(self, x, r):
-        x = self.prefix(x)
+        #x = self.prefix(x)
+        x0, x1 = 0, x
+        for op in self.prefix_group:
+            x = self.relu(op(x) + x0)
+            x0, x1 = x1, x
+
         x = x.view(x.size(0), self.emsize, 4)
 
         for _ in xrange(r-2):
-            x = self.recurrent(x)
-        return self.postfix(x)
+            #x = self.recurrent(x)
+            x = self.expand_conv(x)
+            x0, x1 = 0, x
+            for op in self.recurrent_group:
+                x = self.relu(op(x) + x0)
+                x0, x1 = x1, x
+
+        x0, x1 = 0, x
+        for op in self.postfix_group:
+            x = self.relu(op(x) + x0)
+            x0, x1 = x1, x
+
+        #return self.postfix(x)
+        return x
 
 
 class ByteCNN(nn.Module):
