@@ -233,7 +233,8 @@ class ByteCNN(nn.Module):
         self.encoder = ByteCNNEncoder(n, emsize)
         self.decoder = ByteCNNDecoder(n, emsize)
         self.log_softmax = nn.LogSoftmax()
-        self.criterion = nn.NLLLoss()
+        #self.criterion = nn.NLLLoss()
+        self.criterion = nn.CrossEntropyLoss()
 
     def forward(self, x):
         r = self.encoder.num_recurrences(x)
@@ -256,6 +257,10 @@ class ByteCNN(nn.Module):
                 src.view(-1))
             loss.backward()
             optimizer.step()
+            print(
+                    "DEBUG: src.size =", src.size(),
+                    "features.size =", features.size(),
+                    "tgt.size =", tgt.size())
 
             _, predictions = tgt.data.max(dim=1)
             err_rate = 100. * (predictions != src.data).sum() / np.prod(src.size())
