@@ -257,10 +257,6 @@ class ByteCNN(nn.Module):
                 src.view(-1))
             loss.backward()
             optimizer.step()
-            print(
-                    "DEBUG: src.size =", src.size(),
-                    "features.size =", features.size(),
-                    "tgt.size =", tgt.size())
 
             _, predictions = tgt.data.max(dim=1)
             err_rate = 100. * (predictions != src.data).sum() / np.prod(src.size())
@@ -275,6 +271,7 @@ class ByteCNN(nn.Module):
         errs = 0
         samples = 0
         total_loss = 0
+        batch_cnt = 0
         for src in batch_iterator:
             src = Variable(src, volatile=True)
             r = self.encoder.num_recurrences(src)
@@ -287,7 +284,8 @@ class ByteCNN(nn.Module):
             _, predictions = tgt.data.max(dim=1)
             errs += (predictions != src.data).sum()
             samples += np.prod(src.size())
-        return {'loss': total_loss.data[0], 'acc': 100 - 100. * errs / samples}
+            batch_cnt += 1
+        return {'loss': total_loss.data[0]/batch_cnt, 'acc': 100 - 100. * errs / samples}
 
     @staticmethod
     def load_model(path):
