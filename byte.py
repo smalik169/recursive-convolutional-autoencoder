@@ -131,6 +131,30 @@ def insert_relu(layer_list, last=True):
     return ret if last else ret[:-1]
 
 
+class ResidualGroup(nn.Module):
+    def __init__(self, group, activation=nn.ReLU(), last_activation=True):
+        super(ResidualGroup, self).__init__()
+
+        self.activation = activation
+        self.last_activation = last_activation
+        self.group = nn.ModuleList(group)
+
+    def forward(self, x):
+        prev_x = x
+        add = False
+        for i in range(len(self.group) - 1):
+            op = self.group[i]
+            x = self.activation(op(x) + (prev_x if add else 0))
+            if add:
+                prev_x = x
+            add = not add
+
+        x = self.group[-1](x) + (prev_x if add else 0)
+        if self.last_activation:
+            x = self.activation(x)
+        return x
+
+
 class ByteCNNEncoder(nn.Module):
     def __init__(self, n, emsize=257):
         super(ByteCNNEncoder, self).__init__()
@@ -146,39 +170,20 @@ class ByteCNNEncoder(nn.Module):
         #                          name='max_pool')
         #self.postfix = nn.Sequential(*insert_relu(linear_block, last=False))
 
-        self.prefix_group = nn.ModuleList(conv_block(n))
-        self.recurrent_group = nn.ModuleList(conv_block(n))
-        self.postfix_group = nn.ModuleList(linear_block)
-
-        self.max_pool = nn.MaxPool1d(kernel_size=2)
-        self.relu = nn.ReLU()
+        self.prefix = ResidualGroup(conv_block(n))
+        self.recurrent = nn.Sequential(
+                ResidualGroup(conv_block(n)), nn.MaxPool1d(kernel_size=2))
+        self.postfix = ResidualGroup(linear_block, last_activation=False)
 
     def forward(self, x, r):
         x = self.embedding(x).transpose(1, 2)
-
-        x0, x1 = 0, x
-        #x = self.prefix(x)
-        for op in self.prefix_group:
-            x = self.relu(op(x) + x0)
-            x0, x1 = x1, x
+        x = self.prefix(x)
 
         for _ in xrange(r-2):
-        #    x = self.recurrent(x)
-            x0, x1 = 0, x
-            for op in self.recurrent_group:
-                x = self.relu(op(x) + x0)
-                x0, x1 = x1, x
-            x = self.max_pool(x)
+            x = self.recurrent(x)
 
         bsz = x.size(0)
-        x = x.view([bsz, -1])
-        x0, x1 = 0, x
-        for op in self.postfix_group:
-            x = self.relu(op(x) + x0)
-            x0, x1 = x1, x
-
-        #return self.postfix(x.view(bsz, -1))
-        return x
+        return self.postfix(x.view(bsz, -1))
 
     def num_recurrences(self, x):
         rfloat = np.log2(x.size(-1))
@@ -203,38 +208,20 @@ class ByteCNNDecoder(nn.Module):
         #                                 conv_block_fun(n)))
         #self.postfix = nn.Sequential(*conv_block_fun(n))
 
-        self.prefix_group = nn.ModuleList(linear_block)
-        self.recurrent_group = nn.ModuleList(conv_block_fun(n-1))
-        self.postfix_group = nn.ModuleList(conv_block_fun(n))
-
-        self.expand_conv = ExpandConv1d(emsize, emsize * 2, 3, padding=1)
-        self.relu = nn.ReLU()
-
+        self.prefix = ResidualGroup(linear_block)
+        self.recurrent = nn.Sequential(
+            ExpandConv1d(emsize, emsize * 2, 3, padding=1),
+            ResidualGroup(conv_block_fun(n-1)))
+        self.postfix = ResidualGroup(conv_block_fun(n), last_activation=False)
 
     def forward(self, x, r):
-        #x = self.prefix(x)
-        x0, x1 = 0, x
-        for op in self.prefix_group:
-            x = self.relu(op(x) + x0)
-            x0, x1 = x1, x
-
+        x = self.prefix(x)
         x = x.view(x.size(0), self.emsize, 4)
 
         for _ in xrange(r-2):
-            #x = self.recurrent(x)
-            x = self.expand_conv(x)
-            x0, x1 = 0, x
-            for op in self.recurrent_group:
-                x = self.relu(op(x) + x0)
-                x0, x1 = x1, x
+            x = self.recurrent(x)
 
-        x0, x1 = 0, x
-        for op in self.postfix_group:
-            x = self.relu(op(x) + x0)
-            x0, x1 = x1, x
-
-        #return self.postfix(x)
-        return x
+        return self.postfix(x)
 
 
 class ByteCNN(nn.Module):
