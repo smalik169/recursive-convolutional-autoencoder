@@ -432,6 +432,7 @@ try:
 
         if lr_decay is not None:
             lr_decay.step()
+            logger.lr = optimizer.param_groups[0]['lr']
 
 
 
