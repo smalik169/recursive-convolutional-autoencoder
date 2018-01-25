@@ -22,7 +22,7 @@ parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
 parser.add_argument('--resume-training-force-args', type=str, default='',
                     help='list of input args to be overwritten when resuming (e.g., # of epochs)')
-parser.add_argument('--data', type=str, default='/pio/data/data/mikolov_simple_examples/data/ptb.', #TODO
+parser.add_argument('--data', type=str, default='./data/ptb.', #TODO
                     help='name of the dataset')
 parser.add_argument('--model', type=str, default='ByteCNN',
                     help='model class')
@@ -135,6 +135,7 @@ class ResidualGroup(nn.Module):
     def __init__(self, group, activation=nn.ReLU(), last_activation=True):
         super(ResidualGroup, self).__init__()
 
+        assert group != []
         self.activation = activation
         self.last_activation = last_activation
         self.group = nn.ModuleList(group)
@@ -152,6 +153,7 @@ class ResidualGroup(nn.Module):
         x = self.group[-1](x) + (prev_x if add else 0)
         if self.last_activation:
             x = self.activation(x)
+
         return x
 
 
@@ -201,6 +203,7 @@ class ByteCNNDecoder(nn.Module):
         linear_block = [l for tupl in linear_block for l in tupl]
         linear_block.append(nn.Linear(emsize * 4, emsize * 4))
 
+        assert n > 0
         self.n = n
         self.emsize = emsize
         #self.prefix = nn.Sequential(*linear_block)
@@ -210,8 +213,10 @@ class ByteCNNDecoder(nn.Module):
 
         self.prefix = ResidualGroup(linear_block)
         self.recurrent = nn.Sequential(
-            ExpandConv1d(emsize, emsize * 2, 3, padding=1),
-            ResidualGroup(conv_block_fun(n-1)))
+                ExpandConv1d(emsize, emsize * 2, 3, padding=1))
+        if n > 1:
+            self.recurrent.add_module(ResidualGroup(conv_block_fun(n-1)))
+
         self.postfix = ResidualGroup(conv_block_fun(n), last_activation=False)
 
     def forward(self, x, r):
