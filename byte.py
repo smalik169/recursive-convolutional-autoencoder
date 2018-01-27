@@ -42,7 +42,7 @@ parser.add_argument('--eval-batch-size', type=int, default=10, metavar='N',
 parser.add_argument('--optimizer', default='sgd',
                     choices=('sgd', 'adam', 'adagrad', 'adadelta'),
                     help='optimization method')
-parser.add_argument('--optimizer-kwargs', type=str, default='momentum=0.9',
+parser.add_argument('--optimizer-kwargs', type=str, default='momentum=0.9,weight_decay=0.00001',
                     help='kwargs for the optimizer (e.g., momentum=0.9)')
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
@@ -165,7 +165,7 @@ class ByteCNNEncoder(nn.Module):
                                        padding=1, bias=False)
         residual_list = lambda proto, k: [Residual(proto) for _ in xrange(k)]
 
-        self.embedding = nn.Embedding(emsize, emsize)
+        self.embedding = nn.Embedding(emsize, emsize, padding_idx=UTF8File.EMPTY)
         self.prefix = nn.Sequential(*(residual_list(conv_proto, n//2)))
         self.recurrent = nn.Sequential(*(residual_list(conv_proto, n//2) + \
                                          [nn.MaxPool1d(kernel_size=2)]))
