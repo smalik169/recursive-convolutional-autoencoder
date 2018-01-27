@@ -22,7 +22,7 @@ parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
 parser.add_argument('--resume-training-force-args', type=str, default='',
                     help='list of input args to be overwritten when resuming (e.g., # of epochs)')
-parser.add_argument('--data', type=str, default='./data/ptb.', #TODO
+parser.add_argument('--data', type=str, default='./data/ptb.',
                     help='name of the dataset')
 parser.add_argument('--model', type=str, default='ByteCNN',
                     help='model class')
@@ -35,14 +35,14 @@ parser.add_argument('--lr-lambda', type=str, default='lambda epoch: 0.5 ** (epoc
                     help='learning rate based on base lr and iteration')
 parser.add_argument('--epochs', type=int, default=40,
                     help='upper epoch limit')
-parser.add_argument('--batch-size', type=int, default=20, metavar='N',
+parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                     help='batch size')
 parser.add_argument('--eval-batch-size', type=int, default=10, metavar='N',
                     help='batch size')
 parser.add_argument('--optimizer', default='sgd',
                     choices=('sgd', 'adam', 'adagrad', 'adadelta'),
                     help='optimization method')
-parser.add_argument('--optimizer-kwargs', type=str, default='',
+parser.add_argument('--optimizer-kwargs', type=str, default='momentum=0.9',
                     help='kwargs for the optimizer (e.g., momentum=0.9)')
 parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
@@ -65,7 +65,7 @@ args = parser.parse_args()
 
 class UTF8File(object):
     EOS = 0  # ASCII null symbol
-    EMPTY = 7
+    EMPTY = 7 # XXX
     def __init__(self, path, cuda, rng=None):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
@@ -115,8 +115,8 @@ class UTF8File(object):
 class UTF8Corpus(object):
     def __init__(self, path, cuda, rng=None):
         self.train = UTF8File(path + 'train.txt', cuda, rng=rng)
-        self.valid = UTF8File(path + 'test.txt', cuda, rng=rng)
-        self.test = UTF8File(path + 'valid.txt', cuda, rng=rng)
+        self.valid = UTF8File(path + 'valid.txt', cuda, rng=rng)
+        self.test = UTF8File(path + 'test.txt', cuda, rng=rng)
 
 
 class ExpandConv1d(nn.Module):
@@ -132,82 +132,45 @@ class ExpandConv1d(nn.Module):
         return x.view(bsz, c // 2, 2 * l).contiguous()
 
 
-def insert_relu(layer_list, last=True):
-    ret = list(chain.from_iterable(zip(layer_list,
-                                       [nn.ReLU() for _ in layer_list])))
-    return ret if last else ret[:-1]
-
-
-class ResidualBlock(nn.Module):
-    def __init__(self, layer_proto, last_activation=True):
-        super(ResidualBlock, self).__init__()
+class Residual(nn.Module):
+    def __init__(self, layer_proto, out_relu=True):
+        super(Residual, self).__init__()
         self.layer1 = layer_proto()
-        self.activ = nn.ReLU()
+        self.relu = nn.ReLU()
         self.layer2 = layer_proto()
-        self.last_activation = last_activation
+        self.out_relu = out_relu
 
     def forward(self, x):
         residual = x
         out = self.layer1(x)
         # out = self.bn1(out)
-        out = self.activ(out)
+        out = self.relu(out)
         out = self.layer2(out)
         # out = self.bn2(out)
 
         out += residual
-        if self.last_activation:
-            out = self.activ(out)
+        if self.out_relu:
+            out = self.relu(out)
         return out
-
-
-class ResidualGroup(nn.Module):
-    def __init__(self, group, activation=nn.ReLU(), last_activation=True):
-        super(ResidualGroup, self).__init__()
-
-        assert group != []
-        self.activation = activation
-        self.last_activation = last_activation
-        self.group = nn.ModuleList(group)
-
-    def forward(self, x):
-        prev_x = x
-        add = False
-        for i in range(len(self.group) - 1):
-            op = self.group[i]
-            x = self.activation(op(x) + (prev_x if add else 0))
-            if add:
-                prev_x = x
-            add = not add
-
-        x = self.group[-1](x) + (prev_x if add else 0)
-        if self.last_activation:
-            x = self.activation(x)
-
-        return x
 
 
 class ByteCNNEncoder(nn.Module):
     def __init__(self, n, emsize):
         super(ByteCNNEncoder, self).__init__()
+        self.n = n
+        self.emsize = emsize
+        assert n % 2 == 0, 'n should be a multiple of 2'
+        linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, kernel_size=3, stride=1,
                                        padding=1, bias=False)
-        linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
+        residual_list = lambda proto, k: [Residual(proto) for _ in xrange(k)]
 
-        assert n % 2 == 0
-        conv_block = lambda k: [ResidualBlock(conv_proto) for _ in xrange(k // 2)]
-        linear_block = lambda k: [ResidualBlock(linear_proto) for _ in xrange(k // 2 - 1)] + \
-                                 [ResidualBlock(linear_proto, last_activation=False)]
-        self.n = n
         self.embedding = nn.Embedding(emsize, emsize)
-        #self.prefix = nn.Sequential(*insert_relu(conv_block(n), last=True))
-        #self.recurrent = nn.Sequential(*insert_relu(conv_block(n), last=True))
-        #self.recurrent.add_module(module=nn.MaxPool1d(kernel_size=2),
-        #                          name='max_pool')
-        #self.postfix = nn.Sequential(*insert_relu(linear_block, last=False))
-
-        self.prefix = nn.Sequential(*(conv_block(n)))
-        self.recurrent = nn.Sequential(*(conv_block(n) + [nn.MaxPool1d(kernel_size=2)]))
-        self.postfix = nn.Sequential(*(linear_block(n)))
+        self.prefix = nn.Sequential(*(residual_list(conv_proto, n//2)))
+        self.recurrent = nn.Sequential(*(residual_list(conv_proto, n//2) + \
+                                         [nn.MaxPool1d(kernel_size=2)]))
+        self.postfix = nn.Sequential(*(residual_list(linear_proto, n//2-1) + \
+                                       [Residual(linear_proto, out_relu=False)]))
 
     def forward(self, x, r):
         x = self.embedding(x).transpose(1, 2)
@@ -229,29 +192,20 @@ class ByteCNNEncoder(nn.Module):
 class ByteCNNDecoder(nn.Module):
     def __init__(self, n, emsize):
         super(ByteCNNDecoder, self).__init__()
-
+        self.n = n
+        self.emsize = emsize
+        assert n % 2 == 0, 'n should be a multiple of 2'
+        linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
         expand_proto = lambda: ExpandConv1d(emsize, emsize*2, 3, padding=1)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, kernel_size=3, stride=1,
                                        padding=1, bias=False)
-        linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
+        residual_list = lambda proto, k: [Residual(proto) for _ in xrange(k)]
 
-        assert n % 2 == 0
-        conv_block = lambda k: [ResidualBlock(conv_proto) for _ in xrange(k // 2 - 1)] +\
-                               [ResidualBlock(conv_proto, last_activation=False)]
-        linear_block = lambda k: [ResidualBlock(linear_proto) for _ in xrange(k // 2)]
-
-        assert n > 0
-        self.n = n
-        self.emsize = emsize
-        #self.prefix = nn.Sequential(*linear_block)
-        #self.recurrent = nn.Sequential(*([ExpandConv1d(emsize, emsize * 2, 3, padding=1)] +\
-        #                                 conv_block_fun(n)))
-        #self.postfix = nn.Sequential(*conv_block_fun(n))
-
-        self.prefix = nn.Sequential(*(linear_block(n)))
-        self.recurrent = nn.Sequential(*([expand_proto(), nn.ReLU(), conv_proto(), nn.ReLU()] + \
-                                         [ResidualBlock(conv_proto) for _ in xrange(n//2-1)]))
-        self.postfix = nn.Sequential(*(conv_block(n)))
+        self.prefix = nn.Sequential(*(residual_list(linear_proto, n//2)))
+        self.recurrent = nn.Sequential(
+            *([expand_proto(), nn.ReLU(), conv_proto(), nn.ReLU()] + \
+              residual_list(conv_proto, n//2-1)))
+        self.postfix = nn.Sequential(*(residual_list(conv_proto, n//2)))
 
     def forward(self, x, r):
         x = self.prefix(x)
@@ -278,7 +232,7 @@ class ByteCNN(nn.Module):
     def forward(self, x):
         r = self.encoder.num_recurrences(x)
         x = self.encoder(x, r)
-        x = self.decoder(x, r-1)
+        x = self.decoder(x, r)
         return self.log_softmax(x)
 
     def train_on(self, batch_iterator, optimizer, logger=None):
@@ -301,7 +255,7 @@ class ByteCNN(nn.Module):
             err_rate = 100. * (predictions != src.data).sum() / np.prod(src.size())
             losses.append(loss.data[0])
             errs.append(err_rate)
-            logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,}, #loss.data[0]},
+            logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
                              named_params=self.named_parameters)
         return losses, errs
 
@@ -483,9 +437,9 @@ try:
             logger.save_training_state(optimizer, args)
 
         # XXX
-        if model.save_best and False: # not best_val_loss or val_loss['nll_per_w'] < best_val_loss:
-                logger.save_model_state_dict(model.state_dict())
-                best_val_loss = val_loss['nll_per_w']
+        # if model.save_best and False: # not best_val_loss or val_loss['nll_per_w'] < best_val_loss:
+        #         logger.save_model_state_dict(model.state_dict())
+        #         best_val_loss = val_loss['nll_per_w']
 
         if lr_decay is not None:
             lr_decay.step()
