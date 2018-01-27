@@ -65,7 +65,7 @@ args = parser.parse_args()
 
 class UTF8File(object):
     EOS = 0  # ASCII null symbol
-    EMPTY = -1
+    EMPTY = 7
     def __init__(self, path, cuda, rng=None):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
@@ -73,7 +73,7 @@ class UTF8File(object):
         lines_by_len = defaultdict(list)
         with codecs.open(path, 'r', 'utf-8') as f:
             for line in f:
-                bytes_ = [ord(c) for c in line.strip()] + [self.EOS]
+                bytes_ = [ord(c) for c in line.strip().encode('utf-8')] + [self.EOS]
                 bytes_ += [self.EMPTY] * (int(2 ** np.ceil(np.log2(len(bytes_)))) - len(bytes_))
                 lines_by_len[len(bytes_)].append(bytes_)
         # Convert to ndarrays
@@ -106,9 +106,9 @@ class UTF8File(object):
 
     def sample_batch(self):
         sample = 'On a beautiful morning, a busty Amazon rode through a forest.'
-        bytes_ = [ord(c) for c in sample] + [self.EOS] + [self.EMPTY] * 2
-        assert len(bytes_) == 64
-        batch_tensor = torch.from_numpy([bytes_]).long()
+        bytes_ = np.asarray([[ord(c) for c in sample] + [self.EOS] + [self.EMPTY] * 2], dtype=np.int32)
+        assert bytes_.shape[1] == 64, bytes_.shape
+        batch_tensor = torch.from_numpy(bytes_).long()
         yield batch_tensor.cuda() if self.cuda else batch_tensor
 
 
@@ -265,7 +265,7 @@ class ByteCNNDecoder(nn.Module):
 
 class ByteCNN(nn.Module):
     save_best = True
-    def __init__(self, n=8, emsize=257):  ## XXX Check default emsize
+    def __init__(self, n=8, emsize=256):  ## XXX Check default emsize
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -273,7 +273,7 @@ class ByteCNN(nn.Module):
         self.decoder = ByteCNNDecoder(n, emsize)
         self.log_softmax = nn.LogSoftmax()
         #self.criterion = nn.NLLLoss()
-        self.criterion = nn.CrossEntropyLoss()
+        self.criterion = nn.CrossEntropyLoss(ignore_index=UTF8File.EMPTY)
 
     def forward(self, x):
         r = self.encoder.num_recurrences(x)
@@ -293,8 +293,7 @@ class ByteCNN(nn.Module):
             tgt = self.decoder(features, r)
             loss = self.criterion(
                 tgt.transpose(1, 2).contiguous().view(-1, tgt.size(1)),
-                src.view(-1),
-                ignore_index=-1)
+                src.view(-1))
             loss.backward()
             optimizer.step()
 
@@ -326,6 +325,24 @@ class ByteCNN(nn.Module):
             samples += np.prod(src.size())
             batch_cnt += 1
         return {'loss': total_loss.data[0]/batch_cnt, 'acc': 100 - 100. * errs / samples}
+
+    def try_on(self, batch_iterator):
+        self.eval()
+        decoded = []
+        for src in batch_iterator:
+            src = Variable(src, volatile=True)
+            r = self.encoder.num_recurrences(src)
+            features = self.encoder(src, r)
+            tgt = self.decoder(features, r)
+            _, predictions = tgt.data.max(dim=1)
+
+            # Make into strings and append to decoded
+            for pred in predictions:
+                pred = list(pred.cpu().numpy())
+                pred = pred[:pred.index(UTF8File.EOS)] if UTF8File.EOS in pred else pred
+                pred = repr(''.join([chr(c) for c in pred]))
+                decoded.append(pred)
+        return decoded
 
     @staticmethod
     def load_model(path):
@@ -457,6 +474,7 @@ try:
                        optimizer, logger)
         val_loss = model.eval_on(dataset.valid.iter_epoch(args.batch_size,
                                                           evaluation=True))
+        print(model.try_on(dataset.valid.sample_batch())[0])
         logger.valid_log(val_loss)
 
         # Save the model if the validation loss is the best we've seen so far.
