@@ -222,6 +222,8 @@ class Logger(object):
         # self.writers[mode].flush()
 
     def final_log(self, results, result_file="results/log_file.md"):
+        if not os.path.exists(os.path.dirname(results_file)):
+            os.makedirs(os.path.dirname(results_file))
         #for losses in results.values():
         #    losses['pplx'] = np.exp(losses['nll_per_w'])
 
