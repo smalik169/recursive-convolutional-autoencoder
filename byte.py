@@ -160,9 +160,9 @@ class ByteCNNEncoder(nn.Module):
         self.n = n
         self.emsize = emsize
         assert n % 2 == 0, 'n should be a multiple of 2'
+        conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
+        conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        conv_proto = lambda: nn.Conv1d(emsize, emsize, kernel_size=3, stride=1,
-                                       padding=1, bias=False)
         residual_list = lambda proto, k: [Residual(proto) for _ in xrange(k)]
 
         self.embedding = nn.Embedding(emsize, emsize, padding_idx=UTF8File.EMPTY)
@@ -195,10 +195,10 @@ class ByteCNNDecoder(nn.Module):
         self.n = n
         self.emsize = emsize
         assert n % 2 == 0, 'n should be a multiple of 2'
+        conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
+        conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
+        expand_proto = lambda: ExpandConv1d(emsize, emsize*2, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        expand_proto = lambda: ExpandConv1d(emsize, emsize*2, 3, padding=1)
-        conv_proto = lambda: nn.Conv1d(emsize, emsize, kernel_size=3, stride=1,
-                                       padding=1, bias=False)
         residual_list = lambda proto, k: [Residual(proto) for _ in xrange(k)]
 
         self.prefix = nn.Sequential(*(residual_list(linear_proto, n//2)))
