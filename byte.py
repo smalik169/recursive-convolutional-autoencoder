@@ -328,6 +328,7 @@ class ByteCNN(nn.Module):
 # Resume old training?
 ###############################################################################
 
+forced_args = None
 if args.resume_training != '':
     # Overwrite the args with loaded ones, build the model, optimizer, corpus
     # This will allow to keep things similar, e.g., initialize corpus with
@@ -340,7 +341,7 @@ if args.resume_training != '':
     if args.resume_training_force_args != '':
         forced_args = eval('dict(%s)' % args.resume_training_force_args)
         print('\nForcing args: %s' % forced_args)
-        print('\nWarning: Some args (e.g., --lr) will be ignored. '
+        print('\nWarning: Some args (e.g., --optimizer-kwargs) will be ignored. '
               'Some loaded components, as the optimizer, are already constructed.')
         for k,v in forced_args.items():
             assert hasattr(state['args'], k)
@@ -404,6 +405,11 @@ if args.resume_training != '':
     logger = state['logger']
     state = logger.set_training_state(state, optimizer)
     optimizer = state['optimizer']
+
+    if forced_args and forced_args.has_key('lr'):
+        optimizer.param_groups[0]['lr'] = forced_args['lr']
+        logger.lr = forced_args['lr']
+
     model.load_state_dict(logger.load_model_state_dict(current=True))
     first_epoch = logger.epoch + 1
 else:
