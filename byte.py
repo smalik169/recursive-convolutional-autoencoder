@@ -133,20 +133,29 @@ class ExpandConv1d(nn.Module):
 
 
 class Residual(nn.Module):
-    def __init__(self, layer_proto, out_relu=True):
+    def __init__(self, layer_proto, out_relu=True, batch_norm=True):
         super(Residual, self).__init__()
         self.layer1 = layer_proto()
         self.relu = nn.ReLU()
         self.layer2 = layer_proto()
         self.out_relu = out_relu
+        self.batch_norm = batch_norm
+
+        if batch_norm:
+            # XXX
+            C = self.layer1.out_channels if type(self.layer1) is nn.Conv1d else self.layer1.weight.size(0)
+            self.bn1 = nn.BatchNorm1d(C)
+            self.bn2 = nn.BatchNorm1d(C)
 
     def forward(self, x):
         residual = x
         out = self.layer1(x)
-        # out = self.bn1(out)
+        if self.batch_norm:
+            out = self.bn1(out)
         out = self.relu(out)
         out = self.layer2(out)
-        # out = self.bn2(out)
+        if self.batch_norm:
+            out = self.bn2(out)
 
         out += residual
         if self.out_relu:
