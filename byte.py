@@ -75,6 +75,9 @@ class UTF8File(object):
             for line in f:
                 bytes_ = [ord(c) for c in line.strip().encode('utf-8')] + [self.EOS]
                 bytes_ += [self.EMPTY] * (int(2 ** np.ceil(np.log2(len(bytes_)))) - len(bytes_))
+                # Convnet reduces arbitrary length to 4
+                if len(bytes_) < 4:
+                    continue
                 lines_by_len[len(bytes_)].append(bytes_)
         # Convert to ndarrays
         self.lines = {k: np.asarray(v, dtype=np.int32) \
@@ -182,6 +185,7 @@ class ByteCNNEncoder(nn.Module):
                                        [Residual(linear_proto, out_relu=False)]))
 
     def forward(self, x, r):
+        assert x.size(1) >= 4
         x = self.embedding(x).transpose(1, 2)
         x = self.prefix(x)
 
