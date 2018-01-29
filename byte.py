@@ -371,7 +371,7 @@ if args.resume_training != '':
     if args.resume_training_force_args != '':
         forced_args = eval('dict(%s)' % args.resume_training_force_args)
         print('\nForcing args: %s' % forced_args)
-        print('\nWarning: Some args (e.g., --lr) will be ignored. '
+        print('\nWarning: Some args (e.g., --optimizer-kwargs) will be ignored. '
               'Some loaded components, as the optimizer, are already constructed.')
         for k,v in forced_args.items():
             assert hasattr(state['args'], k)
