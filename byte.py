@@ -136,19 +136,28 @@ class ExpandConv1d(nn.Module):
 
 
 class Residual(nn.Module):
-    def __init__(self, layer_proto, out_relu=True, batch_norm=True):
+    def __init__(self, layer_proto, layer2_proto=None, out_relu=True,
+                 batch_norm=True):
         super(Residual, self).__init__()
         self.layer1 = layer_proto()
         self.relu = nn.ReLU()
-        self.layer2 = layer_proto()
+        self.layer2 = layer2_proto() if layer2_proto else layer_proto()
         self.out_relu = out_relu
         self.batch_norm = batch_norm
 
         if batch_norm:
-            # XXX
-            C = self.layer1.out_channels if type(self.layer1) is nn.Conv1d else self.layer1.weight.size(0)
-            self.bn1 = nn.BatchNorm1d(C)
-            self.bn2 = nn.BatchNorm1d(C)
+            self.bn1 = nn.BatchNorm1d(self.num_channels(self.layer1), momentum=0.1)
+            self.bn2 = nn.BatchNorm1d(self.num_channels(self.layer2), momentum=0.1)
+
+    def num_channels(self, layer):
+        if type(layer) is ExpandConv1d:
+            return layer.conv1d.out_channels
+        elif type(layer) is nn.Conv1d:
+            return layer.out_channels
+        elif type(layer) is nn.Linear:
+            return layer.weight.size(0)
+        else:
+            raise ValueError('Unsupported layer type.')
 
     def forward(self, x):
         residual = x
@@ -167,7 +176,7 @@ class Residual(nn.Module):
 
 
 class ByteCNNEncoder(nn.Module):
-    def __init__(self, n, emsize):
+    def __init__(self, n, emsize, batch_norm):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -175,14 +184,14 @@ class ByteCNNEncoder(nn.Module):
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        residual_list = lambda proto, k: [Residual(proto) for _ in xrange(k)]
+        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) for _ in xrange(k)]
 
         self.embedding = nn.Embedding(emsize, emsize, padding_idx=UTF8File.EMPTY)
         self.prefix = nn.Sequential(*(residual_list(conv_proto, n//2)))
         self.recurrent = nn.Sequential(*(residual_list(conv_proto, n//2) + \
                                          [nn.MaxPool1d(kernel_size=2)]))
         self.postfix = nn.Sequential(*(residual_list(linear_proto, n//2-1) + \
-                                       [Residual(linear_proto, out_relu=False)]))
+                                       [Residual(linear_proto, out_relu=False, batch_norm=batch_norm)]))
 
     def forward(self, x, r):
         assert x.size(1) >= 4
@@ -203,7 +212,7 @@ class ByteCNNEncoder(nn.Module):
 
 
 class ByteCNNDecoder(nn.Module):
-    def __init__(self, n, emsize):
+    def __init__(self, n, emsize, batch_norm):
         super(ByteCNNDecoder, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -212,12 +221,19 @@ class ByteCNNDecoder(nn.Module):
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         expand_proto = lambda: ExpandConv1d(emsize, emsize*2, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        residual_list = lambda proto, k: [Residual(proto) for _ in xrange(k)]
+        bn_proto = lambda c: nn.BatchNorm1d(c, momentum=0.1)
+        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) for _ in xrange(k)]
 
         self.prefix = nn.Sequential(*(residual_list(linear_proto, n//2)))
-        self.recurrent = nn.Sequential(
-            *([expand_proto(), nn.ReLU(), conv_proto(), nn.ReLU()] + \
-              residual_list(conv_proto, n//2-1)))
+        if batch_norm:
+            self.recurrent = nn.Sequential(
+                *([expand_proto(), bn_proto(emsize), nn.ReLU(), conv_proto(),
+                   bn_proto(emsize), nn.ReLU()] + \
+                  residual_list(conv_proto, n//2-1)))
+        else:
+            self.recurrent = nn.Sequential(
+                *([expand_proto(), nn.ReLU(), conv_proto(), nn.ReLU()] + \
+                  residual_list(conv_proto, n//2-1)))
         self.postfix = nn.Sequential(*(residual_list(conv_proto, n//2)))
 
     def forward(self, x, r):
@@ -232,12 +248,13 @@ class ByteCNNDecoder(nn.Module):
 
 class ByteCNN(nn.Module):
     save_best = True
-    def __init__(self, n=8, emsize=256):  ## XXX Check default emsize
+    def __init__(self, n=8, emsize=256, batch_norm=True):  ## XXX Check default emsize
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
-        self.encoder = ByteCNNEncoder(n, emsize)
-        self.decoder = ByteCNNDecoder(n, emsize)
+        self.batch_norm = batch_norm
+        self.encoder = ByteCNNEncoder(n, emsize, batch_norm=batch_norm)
+        self.decoder = ByteCNNDecoder(n, emsize, batch_norm=batch_norm)
         self.log_softmax = nn.LogSoftmax()
         #self.criterion = nn.NLLLoss()
         self.criterion = nn.CrossEntropyLoss(ignore_index=UTF8File.EMPTY)
@@ -272,8 +289,8 @@ class ByteCNN(nn.Module):
                              named_params=self.named_parameters)
         return losses, errs
 
-    def eval_on(self, batch_iterator):
-        self.eval()
+    def eval_on(self, batch_iterator, switch_to_eval=True):
+        self.eval() if switch_to_eval else self.train()
         errs = 0
         samples = 0
         total_loss = 0
@@ -293,8 +310,8 @@ class ByteCNN(nn.Module):
             batch_cnt += 1
         return {'loss': total_loss.data[0]/batch_cnt, 'acc': 100 - 100. * errs / samples}
 
-    def try_on(self, batch_iterator):
-        self.eval()
+    def try_on(self, batch_iterator, switch_to_eval=True):
+        self.eval() if switch_to_eval else self.train()
         decoded = []
         for src in batch_iterator:
             src = Variable(src, volatile=True)
@@ -341,6 +358,7 @@ class ByteCNN(nn.Module):
 # Resume old training?
 ###############################################################################
 
+forced_args = None
 if args.resume_training != '':
     # Overwrite the args with loaded ones, build the model, optimizer, corpus
     # This will allow to keep things similar, e.g., initialize corpus with
@@ -417,6 +435,11 @@ if args.resume_training != '':
     logger = state['logger']
     state = logger.set_training_state(state, optimizer)
     optimizer = state['optimizer']
+
+    if forced_args and forced_args.has_key('lr'):
+        optimizer.param_groups[0]['lr'] = forced_args['lr']
+        logger.lr = forced_args['lr']
+
     model.load_state_dict(logger.load_model_state_dict(current=True))
     first_epoch = logger.epoch + 1
 else:
@@ -439,9 +462,15 @@ try:
 
         model.train_on(dataset.train.iter_epoch(args.batch_size),
                        optimizer, logger)
-        val_loss = model.eval_on(dataset.valid.iter_epoch(args.batch_size,
-                                                          evaluation=True))
-        print(model.try_on(dataset.valid.sample_batch())[0])
+
+        # BatchNorm works better in train() mode (related to its running averages)?
+        # https://discuss.pytorch.org/t/model-eval-gives-incorrect-loss-for-model-with-batchnorm-layers/7561/3?u=smth
+        switch_to_eval = (not model.batch_norm)
+        val_loss = model.eval_on(
+            dataset.valid.iter_epoch(args.batch_size, evaluation=True),
+            switch_to_eval=True)
+        # print(model.try_on(dataset.valid.sample_batch(),
+        #                    switch_to_eval=True)[0])
         logger.valid_log(val_loss)
 
         # Save the model if the validation loss is the best we've seen so far.
