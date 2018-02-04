@@ -107,12 +107,20 @@ class UTF8File(object):
                 batch_tensor = torch.from_numpy(self.lines[len_][inds]).long()
                 yield batch_tensor.cuda() if self.cuda else batch_tensor
 
-    def sample_batch(self):
-        sample = 'On a beautiful morning, a busty Amazon rode through a forest.'
-        bytes_ = np.asarray([[ord(c) for c in sample] + [self.EOS] + [self.EMPTY] * 2], dtype=np.int32)
-        assert bytes_.shape[1] == 64, bytes_.shape
-        batch_tensor = torch.from_numpy(bytes_).long()
-        yield batch_tensor.cuda() if self.cuda else batch_tensor
+    def sample_batch(self, bsz, sample_sentence=None): 
+        if not sample_sentence:
+            sample_sentence = 'On a beautiful morning, a busty Amazon rode through a forest.' 
+        sample_sentence = sample_sentence.encode('utf-8')
+        batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
+        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [self.EOS] + \
+                             [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
+                            dtype=np.int32) 
+        assert bytes_.shape[1] == batch_len, bytes_.shape 
+        # batch_tensor = torch.from_numpy(bytes_).long() 
+        inds = np.random.choice(len(self.lines[batch_len]), bsz) 
+        batch_tensor = torch.from_numpy(self.lines[batch_len][inds]).long() 
+        batch_tensor[0] = torch.from_numpy(bytes_).long() 
+        yield batch_tensor.cuda() if self.cuda else batch_tensor 
 
 
 class UTF8Corpus(object):
@@ -176,7 +184,7 @@ class Residual(nn.Module):
 
 
 class ByteCNNEncoder(nn.Module):
-    def __init__(self, n, emsize, batch_norm):
+    def __init__(self, n, emsize, batch_norm, batch_norm_eval_updates=False):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -184,7 +192,8 @@ class ByteCNNEncoder(nn.Module):
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) for _ in xrange(k)]
+        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) \
+                                          for _ in xrange(k)]
 
         self.embedding = nn.Embedding(emsize, emsize, padding_idx=UTF8File.EMPTY)
         self.prefix = nn.Sequential(*(residual_list(conv_proto, n//2)))
@@ -192,6 +201,9 @@ class ByteCNNEncoder(nn.Module):
                                          [nn.MaxPool1d(kernel_size=2)]))
         self.postfix = nn.Sequential(*(residual_list(linear_proto, n//2-1) + \
                                        [Residual(linear_proto, out_relu=False, batch_norm=batch_norm)]))
+
+        self.batch_norm = batch_norm
+        self.batch_norm_eval_updates = batch_norm_eval_updates
 
     def forward(self, x, r):
         assert x.size(1) >= 4
@@ -222,7 +234,8 @@ class ByteCNNDecoder(nn.Module):
         expand_proto = lambda: ExpandConv1d(emsize, emsize*2, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
         bn_proto = lambda c: nn.BatchNorm1d(c, momentum=0.1)
-        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) for _ in xrange(k)]
+        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) \
+                                          for _ in xrange(k)]
 
         self.prefix = nn.Sequential(*(residual_list(linear_proto, n//2)))
         if batch_norm:
@@ -289,8 +302,8 @@ class ByteCNN(nn.Module):
                              named_params=self.named_parameters)
         return losses, errs
 
-    def eval_on(self, batch_iterator, switch_to_eval=True):
-        self.eval() if switch_to_eval else self.train()
+    def eval_on(self, batch_iterator, switch_to_evalmode=True):
+        self.eval() if switch_to_evalmode else self.train()
         errs = 0
         samples = 0
         total_loss = 0
@@ -308,10 +321,11 @@ class ByteCNN(nn.Module):
             errs += (predictions != src.data).sum()
             samples += np.prod(src.size())
             batch_cnt += 1
-        return {'loss': total_loss.data[0]/batch_cnt, 'acc': 100 - 100. * errs / samples}
+        return {'loss': total_loss.data[0]/batch_cnt,
+                'acc': 100 - 100. * errs / samples}
 
-    def try_on(self, batch_iterator, switch_to_eval=True):
-        self.eval() if switch_to_eval else self.train()
+    def try_on(self, batch_iterator, switch_to_evalmode=True):
+        self.eval() if switch_to_evalmode else self.train()
         decoded = []
         for src in batch_iterator:
             src = Variable(src, volatile=True)
@@ -354,184 +368,127 @@ class ByteCNN(nn.Module):
         return model
 
 
-###############################################################################
-# Resume old training?
-###############################################################################
-
-forced_args = None
-if args.resume_training != '':
-    # Overwrite the args with loaded ones, build the model, optimizer, corpus
-    # This will allow to keep things similar, e.g., initialize corpus with
-    # a proper random seed (which will later get overwritten)
-    resume_path = args.resume_training
-    print('\nResuming training of %s' % resume_path)
-    state = Logger.load_training_state(resume_path)
-    state['args'].__dict__['resume_training'] = resume_path # XXX
-
-    if args.resume_training_force_args != '':
-        forced_args = eval('dict(%s)' % args.resume_training_force_args)
-        print('\nForcing args: %s' % forced_args)
-        print('\nWarning: Some args (e.g., --optimizer-kwargs) will be ignored. '
-              'Some loaded components, as the optimizer, are already constructed.')
-        for k,v in forced_args.items():
-            assert hasattr(state['args'], k)
-            setattr(state['args'], k, v)
-    args = state['args']
-    print('\nWarning: Ignoring other input arguments!\n')
-
-# Set the random seed manually for reproducibility.
-torch.manual_seed(args.seed)
-if torch.cuda.is_available():
-    if not args.cuda:
-        print("WARNING: You have a CUDA device, so you should probably "
-              "run with --cuda")
+if __name__ == '__main__':
+    
+    ###############################################################################
+    # Resume old training?
+    ###############################################################################
+    
+    state = None
+    forced_args = None
+    if args.resume_training != '':
+        # Overwrite the args with loaded ones, build the model, optimizer, corpus
+        # This will allow to keep things similar, e.g., initialize corpus with
+        # a proper random seed (which will later get overwritten)
+        args, forced_args, state = logger.resume_training(args)
+    
+    # Set the random seed manually for reproducibility.
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        if not args.cuda:
+            print("WARNING: You have a CUDA device, so you should probably "
+                  "run with --cuda")
+        else:
+            torch.cuda.manual_seed(args.seed)
+    
+    ###############################################################################
+    # Load data
+    ###############################################################################
+    
+    dataset = UTF8Corpus(args.data, cuda=args.cuda)
+    
+    ###############################################################################
+    # Build the model
+    ###############################################################################
+    
+    # Evaluate this early to know which data options to use
+    model_kwargs = eval("dict(%s)" % (args.model_kwargs,))
+    model = ByteCNN(**model_kwargs)
+    
+    if args.cuda:
+        model.cuda()
+    
+    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    num_params = sum([np.prod(p.size()) for p in model_parameters])
+    print("Model summary:\n%s" % (model,))
+    print("Model params:\n%s" % ("\n".join(
+        ["%s: %s" % (p[0], p[1].size()) for p in model.named_parameters()])))
+    print("Number of params: %.2fM" % (num_params / 10.0**6))
+    
+    ###############################################################################
+    # Setup training
+    ###############################################################################
+    
+    optimizer_proto = {'sgd': optim.SGD, 'adam': optim.Adam,
+                       'adagrad': optim.Adagrad, 'adadelta': optim.Adadelta}
+    optimizer_kwargs = eval("dict(%s)" % args.optimizer_kwargs)
+    optimizer_kwargs['lr'] = args.lr
+    optimizer = optimizer_proto[args.optimizer](
+        model.parameters(), **optimizer_kwargs)
+    
+    if args.lr_lambda:
+        # TODO Check how it behaves on resuming training
+        lr_decay = torch.optim.lr_scheduler.LambdaLR(
+            optimizer, lr_lambda=eval(args.lr_lambda))
     else:
-        torch.cuda.manual_seed(args.seed)
-
-###############################################################################
-# Load data
-###############################################################################
-
-dataset = UTF8Corpus(args.data, cuda=args.cuda)
-
-###############################################################################
-# Build the model
-###############################################################################
-
-# Evaluate this early to know which data options to use
-model_kwargs = eval("dict(%s)" % (args.model_kwargs,))
-model = ByteCNN(**model_kwargs)
-
-if args.cuda:
-    model.cuda()
-
-model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-num_params = sum([np.prod(p.size()) for p in model_parameters])
-print("Model summary:\n%s" % (model,))
-print("Model params:\n%s" % ("\n".join(
-    ["%s: %s" % (p[0], p[1].size()) for p in model.named_parameters()])))
-print("Number of params: %.2fM" % (num_params / 10.0**6))
-
-###############################################################################
-# Setup training
-###############################################################################
-
-optimizer_proto = {'sgd': optim.SGD, 'adam': optim.Adam,
-                   'adagrad': optim.Adagrad, 'adadelta': optim.Adadelta}
-optimizer_kwargs = eval("dict(%s)" % args.optimizer_kwargs)
-optimizer_kwargs['lr'] = args.lr
-optimizer = optimizer_proto[args.optimizer](
-    model.parameters(), **optimizer_kwargs)
-
-if args.lr_lambda:
-    # TODO Check how it behaves on resuming training
-    lr_decay = torch.optim.lr_scheduler.LambdaLR(
-        optimizer, lr_lambda=eval(args.lr_lambda))
-else:
-    lr_decay = None
-
-if args.resume_training != '':
-    # State has been loaded before model construction
-    logger = state['logger']
-    state = logger.set_training_state(state, optimizer)
-    optimizer = state['optimizer']
-
-    if forced_args and forced_args.has_key('lr'):
-        optimizer.param_groups[0]['lr'] = forced_args['lr']
-        logger.lr = forced_args['lr']
-
-    model.load_state_dict(logger.load_model_state_dict(current=True))
-    first_epoch = logger.epoch + 1
-else:
-    logger = Logger(optimizer.param_groups[0]['lr'], args.log_interval,
-                    dataset.train.get_num_batches(args.batch_size), logdir=args.logdir,
-                    log_weights=args.log_weights, log_grads=args.log_grads)
-    logger.save_model_info(dict(model=(args.model, model_kwargs)))
-    first_epoch = 1
-print(logger.logdir)
-
-###############################################################################
-# Training code
-###############################################################################
-logger.save_model_state_dict(model.state_dict())
-
-# At any point you can hit Ctrl + C to break out of training early.
-try:
-    for epoch in range(first_epoch, args.epochs+1):
-        logger.mark_epoch_start(epoch)
-
-        model.train_on(dataset.train.iter_epoch(args.batch_size),
-                       optimizer, logger)
-
-        # BatchNorm works better in train() mode (related to its running averages)?
-        # https://discuss.pytorch.org/t/model-eval-gives-incorrect-loss-for-model-with-batchnorm-layers/7561/3?u=smth
-        switch_to_eval = (not model.batch_norm)
-        val_loss = model.eval_on(
-            dataset.valid.iter_epoch(args.batch_size, evaluation=True),
-            switch_to_eval=True)
-        # print(model.try_on(dataset.valid.sample_batch(),
-        #                    switch_to_eval=True)[0])
-        logger.valid_log(val_loss)
-
-        # Save the model if the validation loss is the best we've seen so far.
-        if args.save_state:
-            logger.save_model_state_dict(model.state_dict(), current=True)
-            logger.save_training_state(optimizer, args)
-
-        # XXX
-        # if model.save_best and False: # not best_val_loss or val_loss['nll_per_w'] < best_val_loss:
-        #         logger.save_model_state_dict(model.state_dict())
-        #         best_val_loss = val_loss['nll_per_w']
-
-        if lr_decay is not None:
-            lr_decay.step()
-            logger.lr = optimizer.param_groups[0]['lr']
-
-
-
-except KeyboardInterrupt:
-    print('-' * 89)
-    print('Exiting from training early')
-
-
-# Load the best saved model.
-# model = logger.load_model()
-model.load_state_dict(logger.load_model_state_dict())
-
-# Run on all data
-# train_loss = model.eval_on(
-#     corpus.train.iter_epoch(eval_batch_size, args.bptt, evaluation=True))
-# valid_loss = model.eval_on(
-#     corpus.valid.iter_epoch(eval_batch_size, args.bptt, evaluation=True))
-# results = dict(train=train_loss, valid=valid_loss, test=test_loss)
-
-test_loss = model.eval_on(
-    dataset.test.iter_epoch(args.eval_batch_size, evaluation=True))
-results = dict(test=test_loss)
-
-logger.final_log(results)
-
-# Run on test data.
-#corpus.valid.iter_epoch(eval_batch_size, args.bptt, evaluation=True)
-#test_loss = model.eval_on(
-#    dataset.test.iter_epoch(eval_batch_size, args.bptt, evaluation=True))
-#print('=' * 89)
-#print('| End of training | test loss {:5.2f} | test ppl {:8.2f}'.format(
-#    test_loss, math.exp(test_loss)))
-#print('=' * 89)
-
-# def logging_callback(batch, batch_loss):
-#     global total_loss
-#     global minibatch_start_time
-#     total_loss += batch_loss
-#     if batch % args.log_interval == 0 and batch > 0:
-#         cur_loss = total_loss[0] / args.log_interval
-#         elapsed = (time.time() - minibatch_start_time
-#                    ) * 1000 / args.log_interval
-#         print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.5f} | '
-#               'ms/batch {:5.2f} | loss {:5.2f} | ppl {:8.2f}'.format(
-#                 epoch, batch, num_batches, optimizer.param_groups[0]['lr'],
-#                 elapsed, cur_loss, math.exp(cur_loss)))
-#         total_loss = 0
-#         minibatch_start_time = time.time()
-
+        lr_decay = None
+    
+    if args.resume_training != '':
+        # State has been loaded before model construction
+        logger = state['logger']
+        state = logger.set_training_state(state, optimizer)
+        optimizer = state['optimizer']
+    
+        if forced_args and forced_args.has_key('lr'):
+            optimizer.param_groups[0]['lr'] = forced_args['lr']
+            logger.lr = forced_args['lr']
+    
+        model.load_state_dict(logger.load_model_state_dict(current=True))
+        first_epoch = logger.epoch + 1
+    else:
+        logger = Logger(optimizer.param_groups[0]['lr'], args.log_interval,
+                        dataset.train.get_num_batches(args.batch_size), logdir=args.logdir,
+                        log_weights=args.log_weights, log_grads=args.log_grads)
+        logger.save_model_info(dict(model=(args.model, model_kwargs)))
+        first_epoch = 1
+    print(logger.logdir)
+    
+    ###############################################################################
+    # Training code
+    ###############################################################################
+    logger.save_model_state_dict(model.state_dict())
+    
+    # At any point you can hit Ctrl + C to break out of training early.
+    try:
+        for epoch in range(first_epoch, args.epochs+1):
+            logger.mark_epoch_start(epoch)
+    
+            model.train_on(dataset.train.iter_epoch(args.batch_size),
+                           optimizer, logger)
+    
+            # BatchNorm works better in train() mode (related to its running avgs)?
+            # https://discuss.pytorch.org/t/model-eval-gives-incorrect-loss-for-model-with-batchnorm-layers/7561/3?u=smth
+            val_loss = model.eval_on(
+                dataset.valid.iter_epoch(args.batch_size, evaluation=True),
+                switch_to_evalmode=False)
+            print(model.try_on(dataset.valid.sample_batch(),
+                               switch_to_evalmode=False)[0], args.batch_size)
+            logger.valid_log(val_loss)
+    
+            # Save the model if the validation loss is the best we've seen so far.
+            if args.save_state:
+                logger.save_model_state_dict(model.state_dict(), current=True)
+                logger.save_training_state(optimizer, args)
+    
+            # XXX
+            # if model.save_best and False: # not best_val_loss or val_loss['nll_per_w'] < best_val_loss:
+            #         logger.save_model_state_dict(model.state_dict())
+            #         best_val_loss = val_loss['nll_per_w']
+    
+            if lr_decay is not None:
+                lr_decay.step()
+                logger.lr = optimizer.param_groups[0]['lr']
+    
+    except KeyboardInterrupt:
+        print('-' * 89)
+        print('Exiting from training early')

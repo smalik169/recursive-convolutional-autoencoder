@@ -16,6 +16,25 @@ import tensorflow as tf
 def to_np(x):
     return x.data.cpu().numpy()
 
+def parse_resume_training(args):
+    resume_path = args.resume_training
+    print('\nLoading training state of %s' % resume_path)
+    state = Logger.load_training_state(resume_path)
+    state['args'].__dict__['resume_training'] = resume_path # XXX
+
+    forced_args = None
+    if args.resume_training_force_args != '':
+        forced_args = eval('dict(%s)' % args.resume_training_force_args)
+        print('\nForcing args: %s' % forced_args)
+        print('\nWarning: Some args (e.g., --optimizer-kwargs) will be ignored. '
+              'Some loaded components, as the optimizer, are already constructed.')
+        for k,v in forced_args.items():
+            assert hasattr(state['args'], k)
+            setattr(state['args'], k, v)
+    args = state['args']
+    print('\nWarning: Ignoring other input arguments!\n')
+    return args, forced_args, state
+
 
 class Writer(object):
     def __init__(self, logdir):
