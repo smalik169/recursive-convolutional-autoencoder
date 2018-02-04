@@ -295,7 +295,8 @@ class ByteCNN(nn.Module):
             optimizer.step()
 
             _, predictions = tgt.data.max(dim=1)
-            err_rate = 100. * (predictions != src.data).sum() / np.prod(src.size())
+            mask = (src.data != UTF8File.EMPTY)
+            err_rate = 100. * (predictions[mask] != src.data[mask]).sum() / mask.sum()
             losses.append(loss.data[0])
             errs.append(err_rate)
             logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
@@ -318,8 +319,9 @@ class ByteCNN(nn.Module):
                 src.view(-1))
 
             _, predictions = tgt.data.max(dim=1)
-            errs += (predictions != src.data).sum()
-            samples += np.prod(src.size())
+            mask = (src.data != UTF8File.EMPTY)
+            errs += (predictions[mask] != src.data[mask]).sum()
+            samples += mask.sum()
             batch_cnt += 1
         return {'loss': total_loss.data[0]/batch_cnt,
                 'acc': 100 - 100. * errs / samples}
