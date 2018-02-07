@@ -174,6 +174,81 @@ class UTF8WordStarFile(object):
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 
+class UTF8CharStarFile(object):
+    EOS = 0  # ASCII null symbol
+    EMPTY = 7 # XXX
+    def __init__(self, path, cuda, rng=None, p=0.5):
+        self.cuda = cuda
+        self.rng = np.random.RandomState(rng)
+        self.p = p
+
+        lines_by_len = defaultdict(list)
+        with codecs.open(path, 'r', 'utf-8') as f:
+            for line in f:
+                bytes_ = [ord(c) for c in line.strip().encode('utf-8')] + [self.EOS]
+                bytes_ += [self.EMPTY] * (int(2 ** np.ceil(np.log2(len(bytes_)))) - len(bytes_))
+                # Convnet reduces arbitrary length to 4
+                if len(bytes_) < 4:
+                    continue
+                lines_by_len[len(bytes_)].append(bytes_)
+        # Convert to ndarrays
+        self.lines = {k: np.asarray(v, dtype=np.uint8) \
+                      for k,v in lines_by_len.items()}
+
+    def get_num_batches(self, bsz):
+        return sum(arr.shape[0] // bsz for arr in self.lines.values())
+
+    def iter_epoch(self, bsz, evaluation=False):
+        if evaluation:
+            for len_, data in self.lines.items():
+                for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
+                    tgt = torch.from_numpy(batch).long()
+                    src = tgt.clone()
+                    mask = (torch.rand(src.size()) < self.p)
+                    mask = mask & (src != self.EMPTY)
+                    src[mask] = ord('*')
+                    yield (src.cuda(), tgt.cuda) if self.cuda else (src, tgt)
+        else:
+            batch_inds = []
+            for len_, data in self.lines.items():
+                num_batches = data.shape[0] // bsz
+                if num_batches == 0:
+                    continue
+                all_inds = np.random.permutation(data.shape[0])
+                all_inds = all_inds[:(bsz * num_batches)]
+                batch_inds += [(len_,inds) \
+                               for inds in np.split(all_inds, num_batches)]
+            np.random.shuffle(batch_inds)
+            for len_, inds in batch_inds:
+                tgt = torch.from_numpy(self.lines[len_][inds]).long()
+                src = tgt.clone()
+                mask = (torch.rand(src.size()) < self.p)
+                mask = mask & (src != self.EMPTY)
+                src[mask] = ord('*')
+                yield (src.cuda(), tgt.cuda) if self.cuda else (src, tgt)
+
+    def sample_batch(self, bsz, sample_sentence=None):
+        if not sample_sentence:
+            sample_sentence = 'On a beautiful morning, a busty Amazon rode through a forest.'
+        sample_sentence = sample_sentence.encode('utf-8')
+        print("Source:", sample_sentence)
+        batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
+        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [self.EOS] + \
+                             [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
+                            dtype=np.uint8)
+        assert bytes_.shape[0] == batch_len
+        # batch_tensor = torch.from_numpy(bytes_).long() 
+        inds = np.random.choice(len(self.lines[batch_len]), bsz)
+        tgt = torch.from_numpy(self.lines[batch_len][inds]).long()
+        tgt[0] = torch.from_numpy(bytes_).long()
+        src = tgt.clone()
+        mask = (torch.rand(src.size()) < self.p)
+        mask = mask & (src != self.EMPTY)
+        src[mask] = ord('*')
+        print("Source:", ''.join(map(chr, src[0].numpy()))
+        yield (src.cuda(), tgt.cuda) if self.cuda else (src, tgt)
+
+
 class UTF8Corpus(object):
     def __init__(self, path, cuda, file_class=UTF8File, rng=None):
         self.train = file_class(path + 'train.txt', cuda, rng=rng)
