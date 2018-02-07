@@ -22,7 +22,7 @@ parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
 parser.add_argument('--resume-training-force-args', type=str, default='',
                     help='list of input args to be overwritten when resuming (e.g., # of epochs)')
-parser.add_argument('--data', type=str, default='./data/ptb.',
+parser.add_argument('--data', type=str, default='/pio/data/data/bytecnn/wikitext-103/wikitext-103.',
                     help='name of the dataset')
 parser.add_argument('--model', type=str, default='ByteCNN',
                     help='model class')
@@ -107,20 +107,20 @@ class UTF8File(object):
                 batch_tensor = torch.from_numpy(self.lines[len_][inds]).long()
                 yield batch_tensor.cuda() if self.cuda else batch_tensor
 
-    def sample_batch(self, bsz, sample_sentence=None): 
+    def sample_batch(self, bsz, sample_sentence=None):
         if not sample_sentence:
-            sample_sentence = 'On a beautiful morning, a busty Amazon rode through a forest.' 
+            sample_sentence = 'On a beautiful morning, a busty Amazon rode through a forest.'
         sample_sentence = sample_sentence.encode('utf-8')
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
         bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [self.EOS] + \
                              [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
-                            dtype=np.int32) 
-        assert bytes_.shape[1] == batch_len, bytes_.shape 
+                            dtype=np.int32)
+        assert bytes_.shape[1] == batch_len, bytes_.shape
         # batch_tensor = torch.from_numpy(bytes_).long() 
-        inds = np.random.choice(len(self.lines[batch_len]), bsz) 
-        batch_tensor = torch.from_numpy(self.lines[batch_len][inds]).long() 
-        batch_tensor[0] = torch.from_numpy(bytes_).long() 
-        yield batch_tensor.cuda() if self.cuda else batch_tensor 
+        inds = np.random.choice(len(self.lines[batch_len]), bsz)
+        batch_tensor = torch.from_numpy(self.lines[batch_len][inds]).long()
+        batch_tensor[0] = torch.from_numpy(bytes_).long()
+        yield batch_tensor.cuda() if self.cuda else batch_tensor
 
 
 class UTF8Corpus(object):
@@ -177,7 +177,7 @@ class Residual(nn.Module):
         if self.batch_norm:
             out = self.bn2(out)
 
-        out += residual
+        #out += residual
         if self.out_relu:
             out = self.relu(out)
         return out
@@ -324,7 +324,7 @@ class ByteCNN(nn.Module):
             samples += mask.sum()
             batch_cnt += 1
         return {'loss': total_loss.data[0]/batch_cnt,
-                'acc': 100 - 100. * errs / samples}
+                'acc': 100 - 100. * errs / samples,}
 
     def try_on(self, batch_iterator, switch_to_evalmode=True):
         self.eval() if switch_to_evalmode else self.train()
@@ -349,11 +349,11 @@ class ByteCNN(nn.Module):
         """Load a model"""
         model_pt = os.path.join(path, 'model.pt')
         model_info = os.path.join(path, 'model.info')
-    
+
         with open(model_info, 'r') as f:
             p = defaultdict(str)
             p.update(dict(line.strip().split('=', 1) for line in f))
-    
+
         # Read and pop one by one, then raise if something's left
         model_class = eval(p['model_class'])
         del p['model_class']
@@ -361,9 +361,154 @@ class ByteCNN(nn.Module):
         del p['model_kwargs']
         if len(p) > 0:
             raise ValueError('Unknown model params: ' + ', '.join(p.keys()))
-       
+
         assert p['model_class'] == 'ByteCNN', \
-            'Tried to load %s as ByteCNN' % p['model_class'] 
+            'Tried to load %s as ByteCNN' % p['model_class']
+        model = model_class(**model_kwargs)
+        with open(model_pt, 'rb') as f:
+            model.load_state_dict(torch.load(f))
+        return model
+
+
+class VAEByteCNN(nn.Module):
+    save_best = True
+    def __init__(self, n=8, emsize=256, batch_norm=True,  ## XXX Check default emsize
+                 kl_weight_init=1e-5, kl_weight_end=1.0,
+                 kl_increment_start=None, kl_increment=None):
+        super(VAEByteCNN, self).__init__()
+        self.n = n
+        self.emsize = emsize
+        self.batch_norm = batch_norm
+        self.encoder = ByteCNNEncoder(n, emsize, batch_norm=batch_norm)
+        self.decoder = ByteCNNDecoder(n, emsize, batch_norm=batch_norm)
+        self.log_softmax = nn.LogSoftmax()
+        self.criterion = nn.CrossEntropyLoss(ignore_index=UTF8File.EMPTY)
+        self.projection = nn.Linear(4*emsize, 8*emsize)
+
+        self.kl_weight = kl_weight_init
+        self.kl_weight_end = kl_weight_end
+        self.kl_increment_start = kl_increment_start
+        self.kl_increment = kl_increment
+
+    def get_features_and_KL(self, mu, log_sigma):
+        bs = mu.size(0)
+        dim = mu.size(1)
+        sigma = torch.exp(log_sigma)
+        kl = -0.5 * torch.sum((1.0 + 2.0 * log_sigma - mu**2 - sigma**2) / bs)
+        epsilon = mu.data.new(bs, dim).normal_()
+        epsilon = Variable(epsilon)
+        features = epsilon * sigma + mu
+        return features, kl
+
+    def forward(self, x):
+        r = self.encoder.num_recurrences(x)
+        x = self.encoder(x, r)
+        x = self.decoder(x, r)
+        return self.log_softmax(x)
+
+    def train_on(self, batch_iterator, optimizer, logger=None):
+        self.train()
+        losses = []
+        errs = []
+        for batch, src in enumerate(batch_iterator):
+            self.zero_grad()
+            src = Variable(src)
+            r = self.encoder.num_recurrences(src)
+            dist_params = self.projection(self.encoder(src, r))
+            mu, log_sigma = dist_params.chunk(2, dim=1)
+            log_sigma /= 33.0
+            features, kl = self.get_features_and_KL(mu, log_sigma)
+            tgt = self.decoder(features, r)
+            loss = self.criterion(
+                tgt.transpose(1, 2).contiguous().view(-1, tgt.size(1)),
+                src.view(-1)) + self.kl_weight * kl
+            loss.backward()
+            optimizer.step()
+
+            _, predictions = tgt.data.max(dim=1)
+            mask = (src.data != UTF8File.EMPTY)
+            err_rate = 100. * (predictions[mask] != src.data[mask]).sum() / mask.sum()
+            losses.append(loss.data[0])
+            errs.append(err_rate)
+            logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,
+                                     'kl': kl.data[0], 'kl_weight': self.kl_weight},
+                             named_params=self.named_parameters)
+
+            if self.kl_increment_start > 0:
+                self.kl_increment_start -= 1
+            else:
+                self.kl_weight = min(self.kl_weight_end,
+                                     self.kl_weight + self.kl_increment)
+        return losses, errs
+
+    def eval_on(self, batch_iterator, switch_to_evalmode=True):
+        self.eval() if switch_to_evalmode else self.train()
+        errs = 0
+        samples = 0
+        total_loss = 0
+        batch_cnt = 0
+        for src in batch_iterator:
+            src = Variable(src, volatile=True)
+            r = self.encoder.num_recurrences(src)
+            dist_params = self.projection(self.encoder(src, r))
+            mu, log_sigma = dist_params.chunk(2, dim=1)
+            log_sigma /= 33.0
+            features, kl = self.get_features_and_KL(mu, log_sigma)
+            tgt = self.decoder(features, r)
+            total_loss += self.criterion(
+                tgt.transpose(1, 2).contiguous().view(-1, tgt.size(1)),
+                src.view(-1)) + self.kl_weight * kl
+
+            _, predictions = tgt.data.max(dim=1)
+            mask = (src.data != UTF8File.EMPTY)
+            errs += (predictions[mask] != src.data[mask]).sum()
+            samples += mask.sum()
+            batch_cnt += 1
+        return {'loss': total_loss.data[0]/batch_cnt,
+                'acc': 100 - 100. * errs / samples,
+                'kl': kl.data[0], 'kl_weight': self.kl_weight}
+
+    def try_on(self, batch_iterator, switch_to_evalmode=True):
+        self.eval() if switch_to_evalmode else self.train()
+        decoded = []
+        for src in batch_iterator:
+            src = Variable(src, volatile=True)
+            r = self.encoder.num_recurrences(src)
+            dist_params = self.projection(self.encoder(src, r))
+            mu, log_sigma = dist_params.chunk(2, dim=1)
+            log_sigma /= 33.0
+            features, _ = self.get_features_and_KL(mu, log_sigma)
+            tgt = self.decoder(features, r)
+            _, predictions = tgt.data.max(dim=1)
+
+            # Make into strings and append to decoded
+            for pred in predictions:
+                pred = list(pred.cpu().numpy())
+                pred = pred[:pred.index(UTF8File.EOS)] if UTF8File.EOS in pred else pred
+                pred = repr(''.join([chr(c) for c in pred]))
+                decoded.append(pred)
+        return decoded
+
+    @staticmethod
+    def load_model(path):
+        """Load a model"""
+        model_pt = os.path.join(path, 'model.pt')
+        model_info = os.path.join(path, 'model.info')
+
+        with open(model_info, 'r') as f:
+            p = defaultdict(str)
+            p.update(dict(line.strip().split('=', 1) for line in f))
+
+        # Read and pop one by one, then raise if something's left
+        model_class = eval(p['model_class'])
+        del p['model_class']
+        model_kwargs = eval("dict(%s)" % p['model_kwargs'])
+        del p['model_kwargs']
+        if len(p) > 0:
+            raise ValueError('Unknown model params: ' + ', '.join(p.keys()))
+
+        assert p['model_class'] == 'VAEByteCNN', \
+            'Tried to load %s as ByteCNN' % p['model_class']
         model = model_class(**model_kwargs)
         with open(model_pt, 'rb') as f:
             model.load_state_dict(torch.load(f))
@@ -371,11 +516,11 @@ class ByteCNN(nn.Module):
 
 
 if __name__ == '__main__':
-    
+
     ###############################################################################
     # Resume old training?
     ###############################################################################
-    
+
     state = None
     forced_args = None
     if args.resume_training != '':
@@ -383,7 +528,7 @@ if __name__ == '__main__':
         # This will allow to keep things similar, e.g., initialize corpus with
         # a proper random seed (which will later get overwritten)
         args, forced_args, state = logger.resume_training(args)
-    
+
     # Set the random seed manually for reproducibility.
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -392,59 +537,66 @@ if __name__ == '__main__':
                   "run with --cuda")
         else:
             torch.cuda.manual_seed(args.seed)
-    
+
     ###############################################################################
     # Load data
     ###############################################################################
-    
+
     dataset = UTF8Corpus(args.data, cuda=args.cuda)
-    
+
     ###############################################################################
     # Build the model
     ###############################################################################
-    
+
     # Evaluate this early to know which data options to use
+    model_class = globals()[args.model]
     model_kwargs = eval("dict(%s)" % (args.model_kwargs,))
-    model = ByteCNN(**model_kwargs)
-    
+    if model_class is VAEByteCNN:
+        num_batches = dataset.train.get_num_batches(args.batch_size)
+        model_kwargs.update(
+                {'kl_increment_start': 4 * num_batches,
+                 'kl_increment': 0.25 / num_batches})
+    model = model_class(**model_kwargs)
+#    model = ByteCNN(**model_kwargs)
+
     if args.cuda:
         model.cuda()
-    
+
     model_parameters = filter(lambda p: p.requires_grad, model.parameters())
     num_params = sum([np.prod(p.size()) for p in model_parameters])
     print("Model summary:\n%s" % (model,))
     print("Model params:\n%s" % ("\n".join(
         ["%s: %s" % (p[0], p[1].size()) for p in model.named_parameters()])))
     print("Number of params: %.2fM" % (num_params / 10.0**6))
-    
+
     ###############################################################################
     # Setup training
     ###############################################################################
-    
+
     optimizer_proto = {'sgd': optim.SGD, 'adam': optim.Adam,
                        'adagrad': optim.Adagrad, 'adadelta': optim.Adadelta}
     optimizer_kwargs = eval("dict(%s)" % args.optimizer_kwargs)
     optimizer_kwargs['lr'] = args.lr
     optimizer = optimizer_proto[args.optimizer](
         model.parameters(), **optimizer_kwargs)
-    
+
     if args.lr_lambda:
         # TODO Check how it behaves on resuming training
         lr_decay = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lr_lambda=eval(args.lr_lambda))
     else:
         lr_decay = None
-    
+
     if args.resume_training != '':
         # State has been loaded before model construction
         logger = state['logger']
         state = logger.set_training_state(state, optimizer)
         optimizer = state['optimizer']
-    
+
         if forced_args and forced_args.has_key('lr'):
             optimizer.param_groups[0]['lr'] = forced_args['lr']
             logger.lr = forced_args['lr']
-    
+
         model.load_state_dict(logger.load_model_state_dict(current=True))
         first_epoch = logger.epoch + 1
     else:
@@ -454,26 +606,26 @@ if __name__ == '__main__':
         logger.save_model_info(dict(model=(args.model, model_kwargs)))
         first_epoch = 1
     print(logger.logdir)
-    
+
     ###############################################################################
     # Training code
     ###############################################################################
     logger.save_model_state_dict(model.state_dict())
-    
+
     # At any point you can hit Ctrl + C to break out of training early.
     try:
         for epoch in range(first_epoch, args.epochs+1):
             logger.mark_epoch_start(epoch)
-    
+
             model.train_on(dataset.train.iter_epoch(args.batch_size),
                            optimizer, logger)
-    
+
             # BatchNorm works better in train() mode (related to its running avgs)?
             # https://discuss.pytorch.org/t/model-eval-gives-incorrect-loss-for-model-with-batchnorm-layers/7561/3?u=smth
             val_loss = model.eval_on(
                 dataset.valid.iter_epoch(args.batch_size, evaluation=True),
                 switch_to_evalmode=False)
-            print(model.try_on(dataset.valid.sample_batch(),
+            print(model.try_on(dataset.valid.sample_batch(128),
                                switch_to_evalmode=False)[0], args.batch_size)
             logger.valid_log(val_loss)
     

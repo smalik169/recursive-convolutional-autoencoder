@@ -89,7 +89,9 @@ args, model, dataset, optimizer = setup_model(args)
 sentences = [
     "I'm so broke I can't even pay attention.",
     "One should always be in love. That is the reason one should never marry.",
-    "We cannot do everything at once, but we can do something at once."]
+    "We cannot do everything at once, but we can do something at once.",
+    "Young man, in mathematics you don't understand things. You just get used to them.",
+    "Szymon jedzie rowerem w dalekie trasy. Podziwia widoki i cieszy go szum wiatru."]
 
 for sent in sentences:
     print(repr(sent))
@@ -121,10 +123,44 @@ def try_on_varlen(model, batch_iterator):
                 decoded[r] = pred
     return decoded
 
+#print('\n\n')
+#for sent in sentences:
+#    print(' '*4, repr(sent))
+#    decoded = try_on_varlen(model, dataset.valid.sample_batch(args.batch_size, sent))
+#    for r in sorted(decoded.keys()):
+#        print('{: <4}'.format(r), decoded[r])
+#    print('-----')
+
+##############################################################################
+# Decode from noise
+##############################################################################
+
+def try_on_sampledhid(model, hid):
+    """Mimics model's try_on() on a range of target lengths."""
+    model.train()
+    decoded = {}
+    hid = Variable(hid, volatile=True)
+    for r in range(4, 8):
+        decoded[r] = []
+        tgt = model.decoder(hid, r)
+        _, predictions = tgt.data.max(dim=1)
+
+        # Make into strings and append to decoded
+        for pred in predictions:
+            pred = list(pred.cpu().numpy())
+            pred = pred[:pred.index(UTF8File.EOS)] if UTF8File.EOS in pred else pred
+            pred = repr(''.join([chr(c) for c in pred]))
+            decoded[r].append(pred)
+    return decoded
+
 print('\n\n')
-for sent in sentences:
-    print(' '*4, repr(sent))
-    decoded = try_on_varlen(model, dataset.valid.sample_batch(args.batch_size, sent))
-    for r in sorted(decoded.keys()):
-        print('{: <4}'.format(r), decoded[r])
-    print('-----')
+for noise_batch in [torch.randn([64, model.emsize*4]), 
+        torch.randn([64, model.emsize*4])]:
+    if args.cuda:
+        noise_batch = noise_batch.cuda()
+    decoded = try_on_sampledhid(model, noise_batch)
+    for i in range(10):
+        for r in sorted(decoded.keys()):
+            print('{: <4}'.format(r), decoded[r][i])
+        print('\n')
+    print('\n')
