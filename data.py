@@ -159,12 +159,12 @@ class UTF8WordStarFile(object):
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
         source_bytes_ = [ord(c) for c in source_sentence] + [self.EOS]
         source_bytes_ += [self.EMPTY] * (batch_len - len(source_bytes_))
-        source_bytes_ = np.asarray(source_bytes_)
+        source_bytes_ = np.asarray([source_bytes_])
         target_bytes_ = np.asarray(
                 [[ord(c) for c in sample_sentence] + [self.EOS] + \
                 [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
                 dtype=np.uint8)
-        assert source_bytes_.shape[0] == batch_len
+        assert source_bytes_.shape[1] == batch_len
         # batch_tensor = torch.from_numpy(bytes_).long() 
         inds = np.random.choice(len(self.lines[batch_len][0]), bsz)
         src = torch.from_numpy(self.lines[batch_len][0][inds]).long()
@@ -207,7 +207,7 @@ class UTF8CharStarFile(object):
                     mask = (torch.rand(src.size()) < self.p)
                     mask = mask & (src != self.EMPTY)
                     src[mask] = ord('*')
-                    yield (src.cuda(), tgt.cuda) if self.cuda else (src, tgt)
+                    yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
         else:
             batch_inds = []
             for len_, data in self.lines.items():
@@ -225,18 +225,17 @@ class UTF8CharStarFile(object):
                 mask = (torch.rand(src.size()) < self.p)
                 mask = mask & (src != self.EMPTY)
                 src[mask] = ord('*')
-                yield (src.cuda(), tgt.cuda) if self.cuda else (src, tgt)
+                yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
     def sample_batch(self, bsz, sample_sentence=None):
         if not sample_sentence:
             sample_sentence = 'On a beautiful morning, a busty Amazon rode through a forest.'
         sample_sentence = sample_sentence.encode('utf-8')
-        print("Source:", sample_sentence)
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
         bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [self.EOS] + \
                              [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
                             dtype=np.uint8)
-        assert bytes_.shape[0] == batch_len
+        assert bytes_.shape[1] == batch_len
         # batch_tensor = torch.from_numpy(bytes_).long() 
         inds = np.random.choice(len(self.lines[batch_len]), bsz)
         tgt = torch.from_numpy(self.lines[batch_len][inds]).long()
@@ -245,8 +244,8 @@ class UTF8CharStarFile(object):
         mask = (torch.rand(src.size()) < self.p)
         mask = mask & (src != self.EMPTY)
         src[mask] = ord('*')
-        print("Source:", ''.join(map(chr, src[0].numpy()))
-        yield (src.cuda(), tgt.cuda) if self.cuda else (src, tgt)
+        print("Source:", ''.join(map(chr, src[0].numpy())))
+        yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 
 class UTF8Corpus(object):
