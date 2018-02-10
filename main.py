@@ -16,12 +16,14 @@ import torch.optim as optim
 from torch.autograd import Variable
 
 import data
+import logger
 import model
-from logger import Logger
 
 parser = argparse.ArgumentParser(description='Byte-level CNN text autoencoder.')
 parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
+parser.add_argument('--initialize-from-model', type=str, default='',
+                    help='load network parameters from other model')
 parser.add_argument('--resume-training-force-args', type=str, default='',
                     help='list of input args to be overwritten when resuming (e.g., # of epochs)')
 parser.add_argument('--data', type=str, default='/pio/data/data/bytecnn/wikitext-103/wikitext-103.',
@@ -79,7 +81,7 @@ if __name__ == '__main__':
         # Overwrite the args with loaded ones, build the model, optimizer, corpus
         # This will allow to keep things similar, e.g., initialize corpus with
         # a proper random seed (which will later get overwritten)
-        args, forced_args, state = logger.resume_training(args)
+        args, forced_args, state = logger.parse_resume_training(args)
 
     # Set the random seed manually for reproducibility.
     torch.manual_seed(args.seed)
@@ -146,7 +148,7 @@ if __name__ == '__main__':
     if args.resume_training != '':
         # State has been loaded before model construction
         logger = state['logger']
-        state = logger.set_training_state(state, optimizer)
+        state = logger.set_training_state(state, optimizer, model)
         optimizer = state['optimizer']
 
         if forced_args and forced_args.has_key('lr'):
@@ -156,9 +158,10 @@ if __name__ == '__main__':
         model.load_state_dict(logger.load_model_state_dict(current=True))
         first_epoch = logger.epoch + 1
     else:
-        logger = Logger(optimizer.param_groups[0]['lr'], args.log_interval,
-                        dataset.train.get_num_batches(args.batch_size), logdir=args.logdir,
-                        log_weights=args.log_weights, log_grads=args.log_grads)
+        logger = logger.Logger(
+            optimizer.param_groups[0]['lr'], args.log_interval,
+            dataset.train.get_num_batches(args.batch_size), logdir=args.logdir,
+            log_weights=args.log_weights, log_grads=args.log_grads)
         logger.save_model_info(dict(model=(args.model, model_kwargs)))
         first_epoch = 1
     print(logger.logdir)
@@ -188,7 +191,9 @@ if __name__ == '__main__':
             # Save the model if the validation loss is the best we've seen so far.
             if args.save_state:
                 logger.save_model_state_dict(model.state_dict(), current=True)
-                logger.save_training_state(optimizer, args)
+                logger.save_training_state(
+                    optimizer, args, 
+                    model_state=(model.get_state() if hasattr(model, 'get_state') else None))
 
             # XXX
             # if model.save_best and False: # not best_val_loss or val_loss['nll_per_w'] < best_val_loss:

@@ -280,6 +280,12 @@ class VAEByteCNN(nn.Module):
         self.kl_increment_start = kl_increment_start
         self.kl_increment = kl_increment
 
+    def get_state(self):
+        return dict(kl_weight=self.kl_weight)
+
+    def load_state(self, state):
+        self.kl_weight = state['kl_weight']
+
     def get_features_and_KL(self, mu, log_sigma):
         bs = mu.size(0)
         dim = mu.size(1)
