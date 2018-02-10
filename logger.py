@@ -119,8 +119,9 @@ class Logger(object):
         with open(path, 'wb') as f:
             torch.save(model_state_dict, f)
 
-    def load_model_state_dict(self, current=False):
-        path = self.model_path if not current else self.current_model_path
+    def load_model_state_dict(self, path=None, current=False):
+        if path is None:
+            path = self.model_path if not current else self.current_model_path
         with open(path, 'rb') as f:
             return torch.load(f)
 

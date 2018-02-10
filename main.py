@@ -3,6 +3,7 @@ from __future__ import print_function
 
 import argparse
 import codecs
+import os
 import pprint
 import time
 from collections import defaultdict
@@ -165,6 +166,12 @@ if __name__ == '__main__':
         logger.save_model_info(dict(model=(args.model, model_kwargs)))
         first_epoch = 1
     print(logger.logdir)
+
+    if args.initialize_from_model != '':
+        print('Trying to load model weights from', args.initialize_from_model)
+        model.load_state_dict(logger.load_model_state_dict(
+            path=os.path.join(args.initialize_from_model, 'current_model.pt')),
+            strict=False)
 
     ###############################################################################
     # Training code
