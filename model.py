@@ -59,7 +59,7 @@ class Residual(nn.Module):
         if self.batch_norm:
             out = self.bn2(out)
 
-        #out += residual
+        out += residual
         if self.out_relu:
             out = self.relu(out)
         return out
@@ -298,6 +298,7 @@ class VAEByteCNN(nn.Module):
 
     def num_recurrences(self, x):
         rfloat = np.log2(x.size(-1))
+
         r = int(rfloat)
         assert float(r) == rfloat
         return r
@@ -309,7 +310,7 @@ class VAEByteCNN(nn.Module):
         mu, log_sigma = dist_params.chunk(2, dim=1)
         log_sigma /= 33.0
         features, kl = self.get_features_and_KL(mu, log_sigma)
-        return self.decoder(features, r_tgt)
+        return self.decoder(features, r_tgt), kl
 
     def train_on(self, batch_iterator, optimizer, logger=None):
         self.train()
@@ -319,7 +320,7 @@ class VAEByteCNN(nn.Module):
             self.zero_grad()
             src = Variable(src)
             tgt = Variable(tgt)
-            decoded = self._encode_decode(src, tgt)
+            decoded, kl = self._encode_decode(src, tgt)
             loss = self.criterion(
                 decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
                 tgt.view(-1)) + self.kl_weight * kl
@@ -348,10 +349,10 @@ class VAEByteCNN(nn.Module):
         samples = 0
         total_loss = 0
         batch_cnt = 0
-        for src in batch_iterator:
+        for batch, (src, tgt) in enumerate(batch_iterator):
             src = Variable(src, volatile=True)
             tgt = Variable(tgt, volatile=True)
-            decoded = self._encode_decode(src, tgt)
+            decoded, kl = self._encode_decode(src, tgt)
             total_loss += self.criterion(
                 decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
                 tgt.view(-1)) + self.kl_weight * kl
@@ -367,11 +368,11 @@ class VAEByteCNN(nn.Module):
 
     def try_on(self, batch_iterator, switch_to_evalmode=True):
         self.eval() if switch_to_evalmode else self.train()
-        decoded = []
-        for src in batch_iterator:
+        predicted = []
+        for batch, (src, tgt) in enumerate(batch_iterator):
             src = Variable(src, volatile=True)
             tgt = Variable(tgt, volatile=True)
-            decoded = self._encode_decode(src, tgt)
+            decoded, kl = self._encode_decode(src, tgt)
             _, predictions = decoded.data.max(dim=1)
 
             # Make into strings and append to decoded
@@ -379,8 +380,8 @@ class VAEByteCNN(nn.Module):
                 pred = list(pred.cpu().numpy())
                 pred = pred[:pred.index(self.eos)] if self.eos in pred else pred
                 pred = repr(''.join([chr(c) for c in pred]))
-                decoded.append(pred)
-        return decoded
+                predicted.append(pred)
+        return predicted
 
     @staticmethod
     def load_model(path):

@@ -104,13 +104,15 @@ if __name__ == '__main__':
 
     # Evaluate this early to know which data options to use
     model_class = getattr(model, args.model)
-    model_kwargs = eval("dict(%s)" % (args.model_kwargs,))
-    model_kwargs.update({"ignore_index": dataset.train.EMPTY})
+    # Set default kwargs for the model
+    model_kwargs = {"ignore_index": dataset.train.EMPTY}
     if model_class is model.VAEByteCNN:
         num_batches = dataset.train.get_num_batches(args.batch_size)
         model_kwargs.update(
                 {'kl_increment_start': 4 * num_batches,
                  'kl_increment': 0.25 / num_batches})
+    # Overwrite with user's kwargs
+    model_kwargs.update(eval("dict(%s)" % (args.model_kwargs,)))
     model = model_class(**model_kwargs)
 
     if args.cuda:
@@ -179,8 +181,8 @@ if __name__ == '__main__':
             val_loss = model.eval_on(
                 dataset.valid.iter_epoch(args.batch_size, evaluation=True),
                 switch_to_evalmode=False)
-            print(model.try_on(dataset.valid.sample_batch(128),
-                               switch_to_evalmode=False)[0], args.batch_size)
+            print(model.try_on(dataset.valid.sample_batch(args.batch_size),
+                               switch_to_evalmode=False)[0])
             logger.valid_log(val_loss)
 
             # Save the model if the validation loss is the best we've seen so far.
