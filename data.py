@@ -177,6 +177,7 @@ class UTF8WordStarFile(object):
 class UTF8CharStarFile(object):
     EOS = 0  # ASCII null symbol
     EMPTY = 7 # XXX
+    WILDCARD = ord('*')
     def __init__(self, path, cuda, rng=None, p=0.5):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
@@ -198,15 +199,19 @@ class UTF8CharStarFile(object):
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
 
+    def _get_mask(self, src):
+        mask = (torch.rand(src.size()) < self.p)
+        mask = mask & (src != self.EMPTY)
+        return mask
+
     def iter_epoch(self, bsz, evaluation=False):
         if evaluation:
             for len_, data in self.lines.items():
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
                     tgt = torch.from_numpy(batch).long()
                     src = tgt.clone()
-                    mask = (torch.rand(src.size()) < self.p)
-                    mask = mask & (src != self.EMPTY)
-                    src[mask] = ord('*')
+                    mask = self._get_mask(src)
+                    src[mask] = self.WILDCARD
                     yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
         else:
             batch_inds = []
@@ -222,9 +227,8 @@ class UTF8CharStarFile(object):
             for len_, inds in batch_inds:
                 tgt = torch.from_numpy(self.lines[len_][inds]).long()
                 src = tgt.clone()
-                mask = (torch.rand(src.size()) < self.p)
-                mask = mask & (src != self.EMPTY)
-                src[mask] = ord('*')
+                mask = self._get_mask(src)
+                src[mask] = self.WILDCARD
                 yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
     def sample_batch(self, bsz, sample_sentence=None):
@@ -247,6 +251,17 @@ class UTF8CharStarFile(object):
         print("Source:", ''.join(map(chr, src[0].numpy())))
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
+
+class UTF8CharVarStarFile(UTF8CharStarFile):
+    WILDCARD = 1  # ASCII start-of-heading (SOH)
+    def _get_mask(self, src):
+        # Half has probs p, half probs drawn uniformly [0,p]
+        sent_probs = torch.cat([torch.rand(src.size(0) // 2, 1) * self.p,
+                                torch.ones(src.size(0) // 2, 1) * self.p],
+                               dim=0)
+        mask = (torch.rand(src.size()) < sent_probs)
+        mask = mask & (src != self.EMPTY)
+        return mask
 
 class UTF8Corpus(object):
     def __init__(self, path, cuda, file_class=UTF8File, rng=None):
