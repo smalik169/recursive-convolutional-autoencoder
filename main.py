@@ -18,7 +18,7 @@ from torch.autograd import Variable
 
 import data
 import logger
-import model
+import models
 
 parser = argparse.ArgumentParser(description='Byte-level CNN text autoencoder.')
 parser.add_argument('--resume-training', type=str, default='',
@@ -106,10 +106,10 @@ if __name__ == '__main__':
     ###############################################################################
 
     # Evaluate this early to know which data options to use
-    model_class = getattr(model, args.model)
+    model_class = getattr(models, args.model)
     # Set default kwargs for the model
     model_kwargs = {"ignore_index": dataset.train.EMPTY}
-    if model_class is model.VAEByteCNN:
+    if model_class is models.VAEByteCNN:
         num_batches = dataset.train.get_num_batches(args.batch_size)
         model_kwargs.update(
                 {'kl_increment_start': 4 * num_batches,

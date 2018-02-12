@@ -256,8 +256,9 @@ class UTF8CharVarStarFile(UTF8CharStarFile):
     WILDCARD = 1  # ASCII start-of-heading (SOH)
     def _get_mask(self, src):
         # Half has probs p, half probs drawn uniformly [0,p]
-        sent_probs = torch.cat([torch.rand(src.size(0) // 2, 1) * self.p,
-                                torch.ones(src.size(0) // 2, 1) * self.p],
+        bsz = src.size(0)
+        sent_probs = torch.cat([torch.rand(bsz // 2, 1) * self.p,
+                                torch.ones(bsz - (bsz // 2), 1) * self.p],
                                dim=0)
         mask = (torch.rand(src.size()) < sent_probs)
         mask = mask & (src != self.EMPTY)

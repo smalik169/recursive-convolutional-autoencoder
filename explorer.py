@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 
-from model import ByteCNN
+from models import ByteCNN
 from data import UTF8Corpus, UTF8File
 import logger as logger_module  # XXX
 from logger import Logger
