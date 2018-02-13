@@ -16,6 +16,25 @@ import tensorflow as tf
 def to_np(x):
     return x.data.cpu().numpy()
 
+def parse_resume_training(args):
+    resume_path = args.resume_training
+    print('\nLoading training state of %s' % resume_path)
+    state = Logger.load_training_state(resume_path)
+    state['args'].__dict__['resume_training'] = resume_path # XXX
+
+    forced_args = None
+    if args.resume_training_force_args != '':
+        forced_args = eval('dict(%s)' % args.resume_training_force_args)
+        print('\nForcing args: %s' % forced_args)
+        print('\nWarning: Some args (e.g., --optimizer-kwargs) will be ignored. '
+              'Some loaded components, as the optimizer, are already constructed.')
+        for k,v in forced_args.items():
+            assert hasattr(state['args'], k)
+            setattr(state['args'], k, v)
+    args = state['args']
+    print('\nWarning: Ignoring other input arguments!\n')
+    return args, forced_args, state
+
 
 class Writer(object):
     def __init__(self, logdir):
@@ -100,12 +119,13 @@ class Logger(object):
         with open(path, 'wb') as f:
             torch.save(model_state_dict, f)
 
-    def load_model_state_dict(self, current=False):
-        path = self.model_path if not current else self.current_model_path
+    def load_model_state_dict(self, path=None, current=False):
+        if path is None:
+            path = self.model_path if not current else self.current_model_path
         with open(path, 'rb') as f:
             return torch.load(f)
 
-    def save_training_state(self, optimizer, args):
+    def save_training_state(self, optimizer, args, model_state=None):
         th = torch.cuda if args.cuda else torch
         # XXX Writers cannot be pickled -- are they stateful or stateless?
         _writers = self.writers
@@ -114,6 +134,7 @@ class Logger(object):
                  'optimizer': optimizer.state_dict(),
                  'args': args,
                  'logger': self,
+                 'model_state': model_state,
                  }
         torch.save(state, self.training_state_path(self.logdir))
         self.writers = _writers
@@ -132,7 +153,7 @@ class Logger(object):
             for name in ['train', 'valid', 'test']}
         return state
 
-    def set_training_state(self, state, optimizer):
+    def set_training_state(self, state, optimizer, model):
         th = torch.cuda if state['args'].cuda else torch
         th.set_rng_state(state['random'])
         del state['random']
@@ -140,6 +161,10 @@ class Logger(object):
         # https://discuss.pytorch.org/t/saving-and-loading-sgd-optimizer/2536
         optimizer.state = defaultdict(dict, optimizer.state)
         state['optimizer'] = optimizer
+
+        model_state = state.get('model_state', None)
+        if model_state:
+            model.load_state(model_state)
         return state
 
     def save_model_info(self, classes_with_kwargs):
@@ -222,27 +247,29 @@ class Logger(object):
         # self.writers[mode].flush()
 
     def final_log(self, results, result_file="results/log_file.md"):
-        for losses in results.values():
-            losses['pplx'] = np.exp(losses['nll_per_w'])
+        if not os.path.exists(os.path.dirname(result_file)):
+            os.makedirs(os.path.dirname(result_file))
+        #for losses in results.values():
+        #    losses['pplx'] = np.exp(losses['nll_per_w'])
 
-        log_line = ('| End of training | test losses {} | test pplx {:5.2f}'
-                    ''.format(results['test'], results['test']['pplx']))
+        log_line = ('| End of training | test losses {} |'
+                    ''.format(results['test']))
         print('=' * len(log_line))
         print(log_line)
         print('=' * len(log_line))
 
-        header =  "|timestamp|args|train pplx|valid pplx|test pplx|other|\n"
-        header += "|---------|----|----------|----------|---------|-----|\n"
+        header =  "|timestamp|args|train acc|valid acc|test acc|other|\n"
+        header += "|---------|----|---------|---------|--------|-----|\n"
 
 	if not results.has_key('train') or not results.has_key('valid'):
             log_line = "| %s | %s | not_evald | not_evald | %.2f | %s |\n" % (
                 self.timestamp, '<br>'.join(sys.argv[1:]),
-                results['test']['pplx'], results)
+                results['test']['acc'], results)
 	else:
             log_line = "| %s | %s | %.2f | %.2f | %.2f | %s |\n" % (
                 self.timestamp, '<br>'.join(sys.argv[1:]),
-                results['train']['pplx'], results['valid']['pplx'],
-                results['test']['pplx'], results)
+                results['train']['acc'], results['valid']['pplx'],
+                results['test']['acc'], results)
 
         with open(self.logdir+"results.md", 'w') as f:
             f.write(header + log_line)
