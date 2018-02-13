@@ -3,6 +3,7 @@ from __future__ import print_function
 
 import argparse
 import codecs
+import os
 import pprint
 import time
 from collections import defaultdict
@@ -16,12 +17,14 @@ import torch.optim as optim
 from torch.autograd import Variable
 
 import data
-import model
-from logger import Logger
+import logger
+import models
 
 parser = argparse.ArgumentParser(description='Byte-level CNN text autoencoder.')
 parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
+parser.add_argument('--initialize-from-model', type=str, default='',
+                    help='load network parameters from other model')
 parser.add_argument('--resume-training-force-args', type=str, default='',
                     help='list of input args to be overwritten when resuming (e.g., # of epochs)')
 parser.add_argument('--data', type=str, default='/pio/data/data/bytecnn/wikitext-103/wiki.sent.raw.',
@@ -79,7 +82,7 @@ if __name__ == '__main__':
         # Overwrite the args with loaded ones, build the model, optimizer, corpus
         # This will allow to keep things similar, e.g., initialize corpus with
         # a proper random seed (which will later get overwritten)
-        args, forced_args, state = logger.resume_training(args)
+        args, forced_args, state = logger.parse_resume_training(args)
 
     # Set the random seed manually for reproducibility.
     torch.manual_seed(args.seed)
@@ -103,14 +106,16 @@ if __name__ == '__main__':
     ###############################################################################
 
     # Evaluate this early to know which data options to use
-    model_class = getattr(model, args.model)
-    model_kwargs = eval("dict(%s)" % (args.model_kwargs,))
-    model_kwargs.update({"ignore_index": dataset.train.EMPTY})
-    if model_class is model.VAEByteCNN:
+    model_class = getattr(models, args.model)
+    # Set default kwargs for the model
+    model_kwargs = {"ignore_index": dataset.train.EMPTY}
+    if model_class is models.VAEByteCNN:
         num_batches = dataset.train.get_num_batches(args.batch_size)
         model_kwargs.update(
                 {'kl_increment_start': 4 * num_batches,
                  'kl_increment': 0.25 / num_batches})
+    # Overwrite with user's kwargs
+    model_kwargs.update(eval("dict(%s)" % (args.model_kwargs,)))
     model = model_class(**model_kwargs)
 
     if args.cuda:
@@ -144,7 +149,7 @@ if __name__ == '__main__':
     if args.resume_training != '':
         # State has been loaded before model construction
         logger = state['logger']
-        state = logger.set_training_state(state, optimizer)
+        state = logger.set_training_state(state, optimizer, model)
         optimizer = state['optimizer']
 
         if forced_args and forced_args.has_key('lr'):
@@ -154,12 +159,19 @@ if __name__ == '__main__':
         model.load_state_dict(logger.load_model_state_dict(current=True))
         first_epoch = logger.epoch + 1
     else:
-        logger = Logger(optimizer.param_groups[0]['lr'], args.log_interval,
-                        dataset.train.get_num_batches(args.batch_size), logdir=args.logdir,
-                        log_weights=args.log_weights, log_grads=args.log_grads)
+        logger = logger.Logger(
+            optimizer.param_groups[0]['lr'], args.log_interval,
+            dataset.train.get_num_batches(args.batch_size), logdir=args.logdir,
+            log_weights=args.log_weights, log_grads=args.log_grads)
         logger.save_model_info(dict(model=(args.model, model_kwargs)))
         first_epoch = 1
     print(logger.logdir)
+
+    if args.initialize_from_model != '':
+        print('Trying to load model weights from', args.initialize_from_model)
+        model.load_state_dict(logger.load_model_state_dict(
+            path=os.path.join(args.initialize_from_model, 'current_model.pt')),
+            strict=False)
 
     ###############################################################################
     # Training code
@@ -179,14 +191,16 @@ if __name__ == '__main__':
             val_loss = model.eval_on(
                 dataset.valid.iter_epoch(args.batch_size, evaluation=True),
                 switch_to_evalmode=False)
-            print(model.try_on(dataset.valid.sample_batch(128),
-                               switch_to_evalmode=False)[0], args.batch_size)
+            print(model.try_on(dataset.valid.sample_batch(args.batch_size),
+                               switch_to_evalmode=False)[0])
             logger.valid_log(val_loss)
 
             # Save the model if the validation loss is the best we've seen so far.
             if args.save_state:
                 logger.save_model_state_dict(model.state_dict(), current=True)
-                logger.save_training_state(optimizer, args)
+                logger.save_training_state(
+                    optimizer, args, 
+                    model_state=(model.get_state() if hasattr(model, 'get_state') else None))
 
             # XXX
             # if model.save_best and False: # not best_val_loss or val_loss['nll_per_w'] < best_val_loss:

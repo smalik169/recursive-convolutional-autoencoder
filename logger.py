@@ -119,12 +119,13 @@ class Logger(object):
         with open(path, 'wb') as f:
             torch.save(model_state_dict, f)
 
-    def load_model_state_dict(self, current=False):
-        path = self.model_path if not current else self.current_model_path
+    def load_model_state_dict(self, path=None, current=False):
+        if path is None:
+            path = self.model_path if not current else self.current_model_path
         with open(path, 'rb') as f:
             return torch.load(f)
 
-    def save_training_state(self, optimizer, args):
+    def save_training_state(self, optimizer, args, model_state=None):
         th = torch.cuda if args.cuda else torch
         # XXX Writers cannot be pickled -- are they stateful or stateless?
         _writers = self.writers
@@ -133,6 +134,7 @@ class Logger(object):
                  'optimizer': optimizer.state_dict(),
                  'args': args,
                  'logger': self,
+                 'model_state': model_state,
                  }
         torch.save(state, self.training_state_path(self.logdir))
         self.writers = _writers
@@ -151,7 +153,7 @@ class Logger(object):
             for name in ['train', 'valid', 'test']}
         return state
 
-    def set_training_state(self, state, optimizer):
+    def set_training_state(self, state, optimizer, model):
         th = torch.cuda if state['args'].cuda else torch
         th.set_rng_state(state['random'])
         del state['random']
@@ -159,6 +161,10 @@ class Logger(object):
         # https://discuss.pytorch.org/t/saving-and-loading-sgd-optimizer/2536
         optimizer.state = defaultdict(dict, optimizer.state)
         state['optimizer'] = optimizer
+
+        model_state = state.get('model_state', None)
+        if model_state:
+            model.load_state(model_state)
         return state
 
     def save_model_info(self, classes_with_kwargs):

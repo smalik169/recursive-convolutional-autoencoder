@@ -5,7 +5,7 @@ import argparse
 import codecs
 import pprint
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from itertools import chain
 
 import numpy as np
@@ -15,7 +15,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 
-from byte import ByteCNN, UTF8Corpus, UTF8File
+from models import ByteCNN
+from data import UTF8Corpus, UTF8File
 import logger as logger_module  # XXX
 from logger import Logger
 
@@ -58,7 +59,7 @@ def setup_model(args):
     
     # State has been loaded before model construction
     logger = state['logger']
-    state = logger.set_training_state(state, optimizer)
+    state = logger.set_training_state(state, optimizer, model)
     optimizer = state['optimizer']
 
     # if args.lr_lambda:
@@ -81,9 +82,38 @@ def setup_model(args):
 
 args, model, dataset, optimizer = setup_model(args)
 
-##############################################################################
-# Decode sample sentences
-##############################################################################
+# print('######################################################################')
+# print('# Count bytes in the data')
+# print('######################################################################')
+# 
+# byte_counter = Counter()
+# for subset in [dataset.train, dataset.valid, dataset.test]:
+#     for val in subset.lines.values():
+#         byte_counter.update(dict(zip(*np.unique(val, return_counts=True))))
+# print('')
+# for k in range(256):
+#     print('{: >3}: {: >10}'.format(k, byte_counter.get(k, 0)))
+# print('')
+
+print('######################################################################')
+print('# Report validation accuracy')
+print('######################################################################')
+
+val_loss = model.eval_on(
+    dataset.valid.iter_epoch(args.batch_size, evaluation=True),
+    switch_to_evalmode=False)
+loss_str = ' : '.join(
+    [' {} {:5.2f}'.format(k, v) for k, v in dict(val_loss).items()])
+loss_str = ('valid {}'.format(loss_str))
+print()
+print('-' * len(loss_str))
+print(loss_str)
+print('-' * len(loss_str))
+print()
+
+print('######################################################################')
+print('# Decode sample sentences')
+print('######################################################################')
 
 # Decode a sentence of my choice.
 sentences = [
@@ -99,17 +129,17 @@ for sent in sentences:
                        switch_to_evalmode=False)[0])
     print('-----')
 
-##############################################################################
-# Decode to different length
-##############################################################################
+print('######################################################################')
+print('# Decode to different length')
+print('######################################################################')
 
 def try_on_varlen(model, batch_iterator):
     """Mimics model's try_on() on a range of target lengths."""
     model.train()
     decoded = {}
-    for src in batch_iterator:
+    for src, _ in batch_iterator:
         src = Variable(src, volatile=True)
-        src_r = model.encoder.num_recurrences(src)
+        src_r = model.num_recurrences(src)
 	for r in range(4, src_r + 3):
             features = model.encoder(src, src_r)
             tgt = model.decoder(features, r)
@@ -123,17 +153,17 @@ def try_on_varlen(model, batch_iterator):
                 decoded[r] = pred
     return decoded
 
-#print('\n\n')
-#for sent in sentences:
-#    print(' '*4, repr(sent))
-#    decoded = try_on_varlen(model, dataset.valid.sample_batch(args.batch_size, sent))
-#    for r in sorted(decoded.keys()):
-#        print('{: <4}'.format(r), decoded[r])
-#    print('-----')
+print('\n\n')
+for sent in sentences:
+    print(' '*4, repr(sent))
+    decoded = try_on_varlen(model, dataset.valid.sample_batch(args.batch_size, sent))
+    for r in sorted(decoded.keys()):
+        print('{: <4}'.format(r), decoded[r])
+    print('-----')
 
-##############################################################################
-# Decode from noise
-##############################################################################
+print('######################################################################')
+print('# Decode from noise')
+print('######################################################################')
 
 def try_on_sampledhid(model, hid):
     """Mimics model's try_on() on a range of target lengths."""
