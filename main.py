@@ -24,7 +24,7 @@ parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
 parser.add_argument('--resume-training-force-args', type=str, default='',
                     help='list of input args to be overwritten when resuming (e.g., # of epochs)')
-parser.add_argument('--data', type=str, default='/pio/data/data/bytecnn/wikitext-103/wikitext-103.',
+parser.add_argument('--data', type=str, default='/pio/data/data/bytecnn/wikitext-103/wiki.sent.raw.',
                     help='name of the dataset')
 parser.add_argument('--file-class', type=str, default='UTF8File',
                     help='data file class')
