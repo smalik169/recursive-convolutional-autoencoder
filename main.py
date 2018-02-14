@@ -182,6 +182,7 @@ if __name__ == '__main__':
         for _ in range(1, first_epoch):
             lr_decay.step()
         new_lr = optimizer.param_groups[0]['lr']
+        logger.lr = new_lr
         print('Decaying lr_rate to epoch %d: %.5f --> %.5f' %
               (first_epoch, old_lr, new_lr))
 

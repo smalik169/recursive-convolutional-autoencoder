@@ -217,30 +217,11 @@ class UTF8WordStarFile(object):
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 
-class UTF8CharStarFile(object):
-    EOS = 0  # ASCII null symbol
-    EMPTY = 7 # XXX
+class UTF8CharStarFile(UTF8File):
     WILDCARD = 1  # ASCII start-of-heading (SOH)
-    def __init__(self, path, cuda, rng=None, p=0.5):
-        self.cuda = cuda
-        self.rng = np.random.RandomState(rng)
+    def __init__(self, path, cuda, p=0.5, **kwargs):
+        super(UTF8CharStarFile, self).__init__(path, cuda, **kwargs)
         self.p = p
-
-        lines_by_len = defaultdict(list)
-        with codecs.open(path, 'r', 'utf-8') as f:
-            for line in f:
-                bytes_ = [ord(c) for c in line.strip().encode('utf-8')] + [self.EOS]
-                bytes_ += [self.EMPTY] * (int(2 ** np.ceil(np.log2(len(bytes_)))) - len(bytes_))
-                # Convnet reduces arbitrary length to 4
-                if len(bytes_) < 4:
-                    continue
-                lines_by_len[len(bytes_)].append(bytes_)
-        # Convert to ndarrays
-        self.lines = {k: np.asarray(v, dtype=np.uint8) \
-                      for k,v in lines_by_len.items()}
-
-    def get_num_batches(self, bsz):
-        return sum(arr.shape[0] // bsz for arr in self.lines.values())
 
     def _get_mask(self, src):
         mask = (torch.rand(src.size()) < self.p)
@@ -251,6 +232,7 @@ class UTF8CharStarFile(object):
         if evaluation:
             for len_, data in self.lines.items():
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
+                    batch = self.maybe_pad(batch)
                     tgt = torch.from_numpy(batch).long()
                     src = tgt.clone()
                     mask = self._get_mask(src)
@@ -268,7 +250,9 @@ class UTF8CharStarFile(object):
                                for inds in np.split(all_inds, num_batches)]
             np.random.shuffle(batch_inds)
             for len_, inds in batch_inds:
-                tgt = torch.from_numpy(self.lines[len_][inds]).long()
+                batch = self.lines[len_][inds]
+                batch = self.maybe_pad(batch)
+                tgt = torch.from_numpy(batch).long()
                 src = tgt.clone()
                 mask = self._get_mask(src)
                 src[mask] = self.WILDCARD
@@ -286,9 +270,9 @@ class UTF8CharStarFile(object):
         # batch_tensor = torch.from_numpy(bytes_).long() 
         inds = np.random.choice(len(self.lines[batch_len]), bsz)
         batch = self.lines[batch_len][inds]
+        batch[0] = bytes_
         batch = self.maybe_pad(batch)
         tgt = torch.from_numpy(batch).long()
-        tgt[0] = torch.from_numpy(bytes_).long()
         src = tgt.clone()
         mask = (torch.rand(src.size()) < self.p)
         mask = mask & (src != self.EMPTY)

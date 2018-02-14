@@ -26,6 +26,8 @@ parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
 parser.add_argument('--resume-training-force-args', type=str, default='',
                     help='list of input args to be overwritten when resuming (e.g., # of epochs)')
+parser.add_argument('--resume-training-force-model-state', type=str, default='',
+                    help='enforce a model state (as a parsable dict)')
 args = parser.parse_args()
 
 
