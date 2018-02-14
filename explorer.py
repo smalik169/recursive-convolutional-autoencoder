@@ -15,7 +15,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 
-from models import ByteCNN
+import models
 from data import UTF8Corpus, UTF8File
 import logger as logger_module  # XXX
 from logger import Logger
@@ -44,8 +44,17 @@ def setup_model(args):
     dataset = UTF8Corpus(args.data, cuda=args.cuda)
     
     # Evaluate this early to know which data options to use
-    model_kwargs = eval("dict(%s)" % (args.model_kwargs,))
-    model = ByteCNN(**model_kwargs)
+    model_class = getattr(models, args.model)
+    # Set default kwargs for the model
+    model_kwargs = {"ignore_index": dataset.train.EMPTY}
+    if model_class is models.VAEByteCNN:
+        num_batches = dataset.train.get_num_batches(args.batch_size)
+        model_kwargs.update(
+                {'kl_increment_start': 4 * num_batches,
+                 'kl_increment': 0.25 / num_batches})
+    # Overwrite with user's kwargs
+    model_kwargs.update(eval("dict(%s)" % (args.model_kwargs,)))
+    model = model_class(**model_kwargs)
     
     if args.cuda:
         model.cuda()
@@ -81,6 +90,18 @@ def setup_model(args):
 
 
 args, model, dataset, optimizer = setup_model(args)
+
+print('######################################################################')
+print('# Average line length')
+print('######################################################################')
+
+sum_ = 0
+lens = 0
+for subset in [dataset.train, dataset.valid, dataset.test]:
+    for val in subset.lines.values():
+        sum_ += np.sum(val != subset.EMPTY)
+        lens += val.shape[0]
+print('\nAverage sentence length (w/o padding): %.2f\n' % (1.0 * sum_ / lens))
 
 # print('######################################################################')
 # print('# Count bytes in the data')

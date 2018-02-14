@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import codecs
+import os
 import pprint
 import time
 from collections import defaultdict
@@ -33,6 +34,11 @@ class UTF8File(object):
         # Convert to ndarrays
         self.lines = {k: np.asarray(v, dtype=np.uint8) \
                       for k,v in lines_by_len.items()}
+
+        # for k, v in self.lines.items():
+        #     cached_path = path + ('.len%d.uint8' % k)
+        #     if not os.path.isfile(cached_path):
+        #         v.tofile(cached_path)
 
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
