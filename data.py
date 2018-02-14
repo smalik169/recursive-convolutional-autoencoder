@@ -220,7 +220,7 @@ class UTF8WordStarFile(object):
 class UTF8CharStarFile(object):
     EOS = 0  # ASCII null symbol
     EMPTY = 7 # XXX
-    WILDCARD = ord('*')
+    WILDCARD = 1  # ASCII start-of-heading (SOH)
     def __init__(self, path, cuda, rng=None, p=0.5):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)

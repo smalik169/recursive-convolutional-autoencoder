@@ -23,6 +23,8 @@ import models
 parser = argparse.ArgumentParser(description='Byte-level CNN text autoencoder.')
 parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
+parser.add_argument('--resume-training-force-model-state', type=str, default='',
+                    help='enforce a model state (as a parsable dict)')
 parser.add_argument('--initialize-from-model', type=str, default='',
                     help='load network parameters from other model')
 parser.add_argument('--resume-training-force-args', type=str, default='',
@@ -84,7 +86,7 @@ if __name__ == '__main__':
         # Overwrite the args with loaded ones, build the model, optimizer, corpus
         # This will allow to keep things similar, e.g., initialize corpus with
         # a proper random seed (which will later get overwritten)
-        args, forced_args, state = logger.parse_resume_training(args)
+        args, forced_args, state, forced_model_state = logger.parse_resume_training(args)
 
     # Set the random seed manually for reproducibility.
     torch.manual_seed(args.seed)
@@ -160,6 +162,10 @@ if __name__ == '__main__':
             optimizer.param_groups[0]['lr'] = forced_args['lr']
             logger.lr = forced_args['lr']
 
+        if forced_model_state:
+            print('Forcing model state: %s' % forced_model_state)
+            model.load_state(forced_model_state)
+
         model.load_state_dict(logger.load_model_state_dict(current=True))
         first_epoch = logger.epoch + 1
     else:
@@ -172,9 +178,12 @@ if __name__ == '__main__':
     print(logger.logdir)
 
     if lr_decay is not None and first_epoch > 1:
-        print('Decaying lr_rate to epoch %d' % first_epoch)
+        old_lr = optimizer.param_groups[0]['lr']
         for _ in range(1, first_epoch):
             lr_decay.step()
+        new_lr = optimizer.param_groups[0]['lr']
+        print('Decaying lr_rate to epoch %d: %.5f --> %.5f' %
+              (first_epoch, old_lr, new_lr))
 
     if args.initialize_from_model != '':
         print('Trying to load model weights from', args.initialize_from_model)

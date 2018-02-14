@@ -30,7 +30,8 @@ args = parser.parse_args()
 
 
 def setup_model(args):
-    args, forced_args, state = logger_module.parse_resume_training(args)
+    args, forced_args, state, forced_model_state = logger_module.parse_resume_training(args)
+
 
     # Set the random seed manually for reproducibility.
     torch.manual_seed(args.seed)

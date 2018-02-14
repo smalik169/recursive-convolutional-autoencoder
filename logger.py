@@ -31,9 +31,20 @@ def parse_resume_training(args):
         for k,v in forced_args.items():
             assert hasattr(state['args'], k)
             setattr(state['args'], k, v)
+    forced_model_state = None
+    if args.resume_training_force_model_state != '':
+        forced_model_state = eval('dict(%s)' % args.resume_training_force_model_state)
+
+    # If some defaults are absent in state['args']
+    for k,v in args.__dict__.items():
+        if k not in state['args']:
+            setattr(state['args'], k, v)
+
     args = state['args']
+    print(args)
     print('\nWarning: Ignoring other input arguments!\n')
-    return args, forced_args, state
+
+    return args, forced_args, state, forced_model_state
 
 
 class Writer(object):
