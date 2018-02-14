@@ -177,9 +177,21 @@ def try_on_varlen(model, batch_iterator):
 print('\n\n')
 for sent in sentences:
     print(' '*4, repr(sent))
-    decoded = try_on_varlen(model, dataset.valid.sample_batch(args.batch_size, sent))
-    for r in sorted(decoded.keys()):
-        print('{: <4}'.format(r), decoded[r])
+    for r in range(4, 9):
+        decoded = model.try_on(dataset.valid.sample_batch(args.batch_size, sent),
+                               switch_to_evalmode=False, r_tgt=r)[0]
+        print('{: <4}'.format(r), decoded)
+    print('-----')
+
+print('######################################################################')
+print('# Decode from noise (VAE)')
+print('######################################################################')
+
+print('\n\n')
+for _ in range(10):
+    decoded = model.try_on(dataset.valid.sample_batch(args.batch_size),
+                           switch_to_evalmode=False, first_sample_random=True)[0]
+    print(decoded)
     print('-----')
 
 print('######################################################################')

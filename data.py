@@ -18,9 +18,27 @@ from torch.autograd import Variable
 class UTF8File(object):
     EOS = 0  # ASCII null symbol
     EMPTY = 7 # XXX
-    def __init__(self, path, cuda, rng=None):
+    def __init__(self, path, cuda, rng=None, fixed_len=None):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
+        self.fixed_len = fixed_len
+
+        self.lines = {}
+	# Is there a cached dataset?
+        fname = os.path.basename(path)
+        base = os.path.dirname(path)
+        cached = [f for f in os.listdir(base) \
+                  if f.startswith(fname) and f.endswith('uint8')]
+        for c in cached:
+            key = int(c.split('.')[-2].replace('len', ''))
+            val = np.fromfile(os.path.join(base, c), dtype=np.uint8).reshape(-1, key)
+            if fixed_len is None or val.shape[1] <= fixed_len:
+                self.lines[key] = val
+            else:
+                print('Dropping matrix of size %s: too long' % str(val.shape))
+        if len(self.lines) > 0:
+            print('Data loaded from cached binary matrices.')
+            return
 
         lines_by_len = defaultdict(list)
         with codecs.open(path, 'r', 'utf-8') as f:
@@ -32,9 +50,16 @@ class UTF8File(object):
                     continue
                 lines_by_len[len(bytes_)].append(bytes_)
         # Convert to ndarrays
-        self.lines = {k: np.asarray(v, dtype=np.uint8) \
-                      for k,v in lines_by_len.items()}
+        self.lines = {}
+        for k,v in lines_by_len.items():
+            if fixed_len is None or len(v[0]) <= fixed_len:
+                self.lines[k] = np.asarray(v, dtype=np.uint8)
+            else:
+                print('Dropping matrix of size %s: too long' % str(len(v[0])))
+        # self.lines = {k: np.asarray(v, dtype=np.uint8) \
+        #               for k,v in lines_by_len.items()}
 
+        # # Cache data matrices
         # for k, v in self.lines.items():
         #     cached_path = path + ('.len%d.uint8' % k)
         #     if not os.path.isfile(cached_path):
@@ -43,10 +68,18 @@ class UTF8File(object):
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
 
+    def maybe_pad(self, batch):
+        if self.fixed_len:
+            return np.pad(batch, ((0,0), (0, self.fixed_len - batch.shape[1])),
+                          'constant', constant_values=self.EMPTY)
+        else:
+            return batch
+
     def iter_epoch(self, bsz, evaluation=False):
         if evaluation:
             for len_, data in self.lines.items():
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
+                    batch = self.maybe_pad(batch)
                     batch_tensor = torch.from_numpy(batch).long()
                     if self.cuda:
                         batch_tensor = batch_tensor.cuda()
@@ -63,7 +96,9 @@ class UTF8File(object):
                                for inds in np.split(all_inds, num_batches)]
             np.random.shuffle(batch_inds)
             for len_, inds in batch_inds:
-                batch_tensor = torch.from_numpy(self.lines[len_][inds]).long()
+                batch = self.lines[len_][inds]
+                batch = self.maybe_pad(batch)
+                batch_tensor = torch.from_numpy(batch).long()
                 if self.cuda:
                     batch_tensor = batch_tensor.cuda()
                 yield (batch_tensor, batch_tensor) #(source, target)
@@ -80,8 +115,10 @@ class UTF8File(object):
         assert bytes_.shape[1] == batch_len, bytes_.shape
         # batch_tensor = torch.from_numpy(bytes_).long() 
         inds = np.random.choice(len(self.lines[batch_len]), bsz)
-        batch_tensor = torch.from_numpy(self.lines[batch_len][inds]).long()
-        batch_tensor[0] = torch.from_numpy(bytes_).long()
+        batch = self.lines[batch_len][inds]
+        batch[0] = bytes_
+        batch = self.maybe_pad(batch)
+        batch_tensor = torch.from_numpy(batch).long()
 
         if self.cuda:
             batch_tensor = batch_tensor.cuda()
@@ -161,7 +198,7 @@ class UTF8WordStarFile(object):
         source_sentence = ' '.join(
                 [('*' * len(word) if len(word) < 6 and np.random.random() < 0.5 else word)
                     for word in sample_sentence.split()])
-        print("Source:", source_sentence)
+        # print("Source:", source_sentence)
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
         source_bytes_ = [ord(c) for c in source_sentence] + [self.EOS]
         source_bytes_ += [self.EMPTY] * (batch_len - len(source_bytes_))
@@ -248,13 +285,15 @@ class UTF8CharStarFile(object):
         assert bytes_.shape[1] == batch_len
         # batch_tensor = torch.from_numpy(bytes_).long() 
         inds = np.random.choice(len(self.lines[batch_len]), bsz)
-        tgt = torch.from_numpy(self.lines[batch_len][inds]).long()
+        batch = self.lines[batch_len][inds]
+        batch = self.maybe_pad(batch)
+        tgt = torch.from_numpy(batch).long()
         tgt[0] = torch.from_numpy(bytes_).long()
         src = tgt.clone()
         mask = (torch.rand(src.size()) < self.p)
         mask = mask & (src != self.EMPTY)
         src[mask] = ord('*')
-        print("Source:", ''.join(map(chr, src[0].numpy())))
+        # print("Source:", ''.join(map(chr, src[0].numpy())))
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 
@@ -271,7 +310,7 @@ class UTF8CharVarStarFile(UTF8CharStarFile):
         return mask
 
 class UTF8Corpus(object):
-    def __init__(self, path, cuda, file_class=UTF8File, rng=None):
-        self.train = file_class(path + 'train.txt', cuda, rng=rng)
-        self.valid = file_class(path + 'valid.txt', cuda, rng=rng)
-        self.test = file_class(path + 'test.txt', cuda, rng=rng)
+    def __init__(self, path, cuda, file_class=UTF8File, rng=None, fixed_len=None):
+        self.train = file_class(path + 'train.txt', cuda, rng=rng, fixed_len=fixed_len)
+        self.valid = file_class(path + 'valid.txt', cuda, rng=rng, fixed_len=fixed_len)
+        self.test = file_class(path + 'test.txt', cuda, rng=rng, fixed_len=fixed_len)

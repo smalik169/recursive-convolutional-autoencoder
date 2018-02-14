@@ -31,6 +31,8 @@ parser.add_argument('--data', type=str, default='/pio/data/data/bytecnn/wikitext
                     help='name of the dataset')
 parser.add_argument('--file-class', type=str, default='UTF8File',
                     help='data file class')
+parser.add_argument('--data-kwargs', type=str, default='',
+                    help='')
 parser.add_argument('--model', type=str, default='ByteCNN',
                     help='model class')
 parser.add_argument('--model-kwargs', type=str, default='',
@@ -97,9 +99,11 @@ if __name__ == '__main__':
     # Load data
     ###############################################################################
 
+    data_kwargs = eval('dict(%s)' % args.data_kwargs)
     dataset = data.UTF8Corpus(
             args.data, cuda=args.cuda,
-            file_class=getattr(data, args.file_class))
+            file_class=getattr(data, args.file_class),
+            **data_kwargs)
 
     ###############################################################################
     # Build the model
@@ -166,6 +170,11 @@ if __name__ == '__main__':
         logger.save_model_info(dict(model=(args.model, model_kwargs)))
         first_epoch = 1
     print(logger.logdir)
+
+    if lr_decay is not None and first_epoch > 1:
+        print('Decaying lr_rate to epoch %d' % first_epoch)
+        for _ in range(1, first_epoch):
+            lr_decay.step()
 
     if args.initialize_from_model != '':
         print('Trying to load model weights from', args.initialize_from_model)
