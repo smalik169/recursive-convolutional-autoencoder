@@ -471,16 +471,19 @@ class VAEByteCNN(nn.Module):
         self.kl_increment = kl_increment
 
     def get_state(self):
-        return dict(kl_weight=self.kl_weight)
+        return dict(kl_weight=self.kl_weight,
+                    kl_increment_start=self.kl_increment_start)
 
     def load_state(self, state):
         self.kl_weight = state['kl_weight']
+        if state.has_key('kl_increment_start'):
+            self.kl_increment_start = state['kl_increment_start']
 
     def get_features_and_KL(self, mu, log_sigma):
         bs = mu.size(0)
         dim = mu.size(1)
         sigma = torch.exp(log_sigma)
-        kl = -0.5 * torch.sum((1.0 + 2.0 * log_sigma - mu**2 - sigma**2) / bs)
+        kl = -0.5 * torch.sum((1.0 + 2.0 * log_sigma - mu**2 - sigma**2) / (bs * dim))
         epsilon = mu.data.new(bs, dim).normal_()
         epsilon = Variable(epsilon)
         features = epsilon * sigma + mu
