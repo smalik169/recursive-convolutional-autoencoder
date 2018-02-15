@@ -1,0 +1,10 @@
+# vim
+*.swp
+*.swo
+*.swn
+
+# Python
+*.pyc
+
+# Experiments
+2018-*
