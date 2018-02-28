@@ -12,6 +12,14 @@ import torch.optim as optim
 from torch.autograd import Variable
 
 
+#class InstanceNorm1d(nn.BatchNorm1d):
+#    def forward(self, data):
+#        return torch.nn.functional.batch_norm(
+#            data, self.running_mean, self.running_var,
+#            self.weight, self.bias,
+#            True, self.momentum, self.eps)
+
+
 class ExpandConv1d(nn.Module):
     def __init__(self, *args, **kwargs):
         super(ExpandConv1d, self).__init__()
@@ -27,17 +35,22 @@ class ExpandConv1d(nn.Module):
 
 class Residual(nn.Module):
     def __init__(self, layer_proto, layer2_proto=None, out_relu=True,
-                 batch_norm=True):
+                 batch_norm=True, instance_norm=False):
         super(Residual, self).__init__()
         self.layer1 = layer_proto()
         self.relu = nn.ReLU()
         self.layer2 = layer2_proto() if layer2_proto else layer_proto()
         self.out_relu = out_relu
-        self.batch_norm = batch_norm
+        self.batch_norm = batch_norm # ignored if instance_norm is True
+        self.instance_norm = instance_norm # if instance_norm is True batch_norm is ignored
 
         if batch_norm:
             self.bn1 = nn.BatchNorm1d(self.num_channels(self.layer1), momentum=0.1)
             self.bn2 = nn.BatchNorm1d(self.num_channels(self.layer2), momentum=0.1)
+
+        if instance_norm:
+            self.in1 = nn.InstanceNorm1d(self.num_channels(self.layer1))
+            self.in2 = nn.InstanceNorm1d(self.num_channels(self.layer2))
 
     def num_channels(self, layer):
         if type(layer) is ExpandConv1d:
@@ -52,11 +65,18 @@ class Residual(nn.Module):
     def forward(self, x):
         residual = x
         out = self.layer1(x)
-        if self.batch_norm:
+
+        if self.instance_norm:
+            out = self.in1(out)
+        elif self.batch_norm:
             out = self.bn1(out)
+
         out = self.relu(out)
         out = self.layer2(out)
-        if self.batch_norm:
+
+        if self.instance_norm:
+            out = self.in2(out)
+        elif self.batch_norm:
             out = self.bn2(out)
 
         out += residual
@@ -66,8 +86,8 @@ class Residual(nn.Module):
 
 
 class ByteCNNEncoder(nn.Module):
-    def __init__(self, n, emsize, batch_norm, batch_norm_eval_updates=False,
-            padding_idx=None):
+    def __init__(self, n, emsize, batch_norm, instance_norm,
+            batch_norm_eval_updates=False, padding_idx=None):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -75,17 +95,28 @@ class ByteCNNEncoder(nn.Module):
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) \
-                                          for _ in xrange(k)]
+        residual_list = lambda proto, k, batch_norm, instance_norm: [
+                Residual(proto, batch_norm=batch_norm, instance_norm=instance_norm)
+                for _ in xrange(k)]
 
         self.embedding = nn.Embedding(emsize, emsize, padding_idx=padding_idx)
-        self.prefix = nn.Sequential(*(residual_list(conv_proto, n//2)))
-        self.recurrent = nn.Sequential(*(residual_list(conv_proto, n//2) + \
-                                         [nn.MaxPool1d(kernel_size=2)]))
-        self.postfix = nn.Sequential(*(residual_list(linear_proto, n//2-1) + \
-                                       [Residual(linear_proto, out_relu=False, batch_norm=batch_norm)]))
+        self.prefix = nn.Sequential(
+                *(residual_list(conv_proto, n//2, batch_norm, instance_norm)))
+        self.recurrent = nn.Sequential(
+                *(residual_list(conv_proto, n//2, batch_norm, instance_norm) + \
+                  [nn.MaxPool1d(kernel_size=2)]))
+        self.postfix = nn.Sequential(
+                *(residual_list(linear_proto, n//2-1,
+                    batch_norm=(batch_norm and not instance_norm),
+                    instance_norm=False) + \
+                  [Residual(
+                      linear_proto,
+                      out_relu=False,
+                      batch_norm=(batch_norm and not instance_norm),
+                      instance_norm=False)]))
 
         self.batch_norm = batch_norm
+        self.instance_norm = instance_norm
         self.batch_norm_eval_updates = batch_norm_eval_updates
 
     def forward(self, x, r):
@@ -101,7 +132,7 @@ class ByteCNNEncoder(nn.Module):
 
 
 class ByteCNNDecoder(nn.Module):
-    def __init__(self, n, emsize, batch_norm):
+    def __init__(self, n, emsize, batch_norm, instance_norm):
         super(ByteCNNDecoder, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -110,21 +141,30 @@ class ByteCNNDecoder(nn.Module):
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         expand_proto = lambda: ExpandConv1d(emsize, emsize*2, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        bn_proto = lambda c: nn.BatchNorm1d(c, momentum=0.1)
-        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) \
+        if instance_norm:
+            norm_proto = lambda c: nn.InstanceNorm1d(c)
+        elif batch_norm:
+            norm_proto = lambda c: nn.BatchNorm1d(c, momentum=0.1)
+        residual_list = lambda proto, k, batch_norm, instance_norm: [
+                Residual(proto, batch_norm=batch_norm, instance_norm=instance_norm) \
                                           for _ in xrange(k)]
 
-        self.prefix = nn.Sequential(*(residual_list(linear_proto, n//2)))
-        if batch_norm:
+        self.prefix = nn.Sequential(
+                *(residual_list(
+                    linear_proto, n//2,
+                    batch_norm=(batch_norm and not instance_norm),
+                    instance_norm=False)))
+        if instance_norm or batch_norm:
             self.recurrent = nn.Sequential(
-                *([expand_proto(), bn_proto(emsize), nn.ReLU(), conv_proto(),
-                   bn_proto(emsize), nn.ReLU()] + \
-                  residual_list(conv_proto, n//2-1)))
+                *([expand_proto(), norm_proto(emsize), nn.ReLU(), conv_proto(),
+                   norm_proto(emsize), nn.ReLU()] + \
+                  residual_list(conv_proto, n//2-1, batch_norm, instance_norm)))
         else:
             self.recurrent = nn.Sequential(
                 *([expand_proto(), nn.ReLU(), conv_proto(), nn.ReLU()] + \
-                  residual_list(conv_proto, n//2-1)))
-        self.postfix = nn.Sequential(*(residual_list(conv_proto, n//2)))
+                  residual_list(conv_proto, n//2-1, batch_norm, instance_norm)))
+        self.postfix = nn.Sequential(
+                *(residual_list(conv_proto, n//2, batch_norm, instance_norm)))
 
     def forward(self, x, r):
         x = self.prefix(x)
@@ -138,14 +178,19 @@ class ByteCNNDecoder(nn.Module):
 
 class ByteCNN(nn.Module):
     save_best = True
-    def __init__(self, n=8, emsize=256, batch_norm=True, ignore_index=-1, eos=0):  ## XXX Check default emsize
+    def __init__(self, n=8, emsize=256,
+            batch_norm=True, instance_norm=False,
+            ignore_index=-1, eos=0):  ## XXX Check default emsize
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
         self.batch_norm = batch_norm
+        self.instance_norm = instance_norm
         self.encoder = ByteCNNEncoder(n, emsize, batch_norm=batch_norm,
+                instance_norm=instance_norm,
                 padding_idx=(ignore_index if ignore_index >= 0 else None))
-        self.decoder = ByteCNNDecoder(n, emsize, batch_norm=batch_norm)
+        self.decoder = ByteCNNDecoder(n, emsize,
+                batch_norm=batch_norm, instance_norm=instance_norm)
         self.log_softmax = nn.LogSoftmax()
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
         self.eos = eos
@@ -218,6 +263,7 @@ class ByteCNN(nn.Module):
         self.eval() if switch_to_evalmode else self.train()
         predicted = []
         for (src, tgt) in batch_iterator:
+            print ("Batch size:", src.size())
             src = Variable(src, volatile=True)
             tgt = Variable(tgt, volatile=True)
             decoded = self._encode_decode(src, tgt)
@@ -260,6 +306,7 @@ class ByteCNN(nn.Module):
 class VAEByteCNN(nn.Module):
     save_best = True
     def __init__(self, n=8, emsize=256, batch_norm=True,  ## XXX Check default emsize
+                 instance_norm=False,
                  ignore_index=-1, eos=0,
                  kl_weight_init=1e-5, kl_weight_end=1.0,
                  kl_increment_start=None, kl_increment=None):
@@ -267,9 +314,12 @@ class VAEByteCNN(nn.Module):
         self.n = n
         self.emsize = emsize
         self.batch_norm = batch_norm
+        self.instance_norm = instance_norm
         self.encoder = ByteCNNEncoder(n, emsize, batch_norm=batch_norm,
+                instance_norm=instance_norm,
                 padding_idx=(ignore_index if ignore_index >= 0 else None))
-        self.decoder = ByteCNNDecoder(n, emsize, batch_norm=batch_norm)
+        self.decoder = ByteCNNDecoder(n, emsize, batch_norm=batch_norm,
+                instance_norm=instance_norm)
         self.log_softmax = nn.LogSoftmax()
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
         self.eos = eos
