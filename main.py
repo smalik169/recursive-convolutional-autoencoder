@@ -191,7 +191,7 @@ if __name__ == '__main__':
             val_loss = model.eval_on(
                 dataset.valid.iter_epoch(args.batch_size, evaluation=True),
                 switch_to_evalmode=False)
-            print(model.try_on(dataset.valid.sample_batch(args.batch_size),
+            print(model.try_on(dataset.valid.sample_batch(1 if model.instance_norm else args.batch_size),
                                switch_to_evalmode=False)[0])
             logger.valid_log(val_loss)
 
