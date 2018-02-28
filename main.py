@@ -17,12 +17,17 @@ import torch.optim as optim
 from torch.autograd import Variable
 
 import data
-import logger
+import explorer
 import models
+import logger as logger_module
 
 parser = argparse.ArgumentParser(description='Byte-level CNN text autoencoder.')
 parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
+parser.add_argument('--resume-training-force-model-state', type=str, default='',
+                    help='enforce a model state (as a parsable dict)')
+parser.add_argument('--explore', action='store_true', default=False,
+                    help='run in explorer mode')
 parser.add_argument('--initialize-from-model', type=str, default='',
                     help='load network parameters from other model')
 parser.add_argument('--resume-training-force-args', type=str, default='',
@@ -31,6 +36,8 @@ parser.add_argument('--data', type=str, default='/pio/data/data/bytecnn/wikitext
                     help='name of the dataset')
 parser.add_argument('--file-class', type=str, default='UTF8File',
                     help='data file class')
+parser.add_argument('--data-kwargs', type=str, default='',
+                    help='')
 parser.add_argument('--model', type=str, default='ByteCNN',
                     help='model class')
 parser.add_argument('--model-kwargs', type=str, default='',
@@ -76,13 +83,13 @@ if __name__ == '__main__':
     # Resume old training?
     ###############################################################################
 
-    state = None
-    forced_args = None
+    explorer_mode = args.explore
+
     if args.resume_training != '':
         # Overwrite the args with loaded ones, build the model, optimizer, corpus
         # This will allow to keep things similar, e.g., initialize corpus with
         # a proper random seed (which will later get overwritten)
-        args, forced_args, state = logger.parse_resume_training(args)
+        args, state = logger_module.parse_resume_training(args)
 
     # Set the random seed manually for reproducibility.
     torch.manual_seed(args.seed)
@@ -97,9 +104,11 @@ if __name__ == '__main__':
     # Load data
     ###############################################################################
 
+    data_kwargs = eval('dict(%s)' % args.data_kwargs)
     dataset = data.UTF8Corpus(
             args.data, cuda=args.cuda,
-            file_class=getattr(data, args.file_class))
+            file_class=getattr(data, args.file_class),
+            **data_kwargs)
 
     ###############################################################################
     # Build the model
@@ -108,7 +117,7 @@ if __name__ == '__main__':
     # Evaluate this early to know which data options to use
     model_class = getattr(models, args.model)
     # Set default kwargs for the model
-    model_kwargs = {"ignore_index": dataset.train.EMPTY}
+    model_kwargs = {"ignore_index": data.EMPTY}
     if model_class is models.VAEByteCNN:
         num_batches = dataset.train.get_num_batches(args.batch_size)
         model_kwargs.update(
@@ -140,43 +149,39 @@ if __name__ == '__main__':
         model.parameters(), **optimizer_kwargs)
 
     if args.lr_lambda:
-        # TODO Check how it behaves on resuming training
-        lr_decay = torch.optim.lr_scheduler.LambdaLR(
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
             optimizer, lr_lambda=eval(args.lr_lambda))
     else:
-        lr_decay = None
+        scheduler = None
 
     if args.resume_training != '':
-        # State has been loaded before model construction
-        logger = state['logger']
-        state = logger.set_training_state(state, optimizer, model)
-        optimizer = state['optimizer']
-
-        if forced_args and forced_args.has_key('lr'):
-            optimizer.param_groups[0]['lr'] = forced_args['lr']
-            logger.lr = forced_args['lr']
-
-        model.load_state_dict(logger.load_model_state_dict(current=True))
-        first_epoch = logger.epoch + 1
+        innards = logger_module.resume_training_innards(state, model, optimizer, scheduler)
+        model = innards['model']
+        optimizer = innards['optimizer']
+        scheduler = innards['scheduler']
+        logger = innards['logger']
+        first_epoch = innards['first_epoch']
     else:
-        logger = logger.Logger(
+        logger = logger_module.Logger(
             optimizer.param_groups[0]['lr'], args.log_interval,
             dataset.train.get_num_batches(args.batch_size), logdir=args.logdir,
             log_weights=args.log_weights, log_grads=args.log_grads)
         logger.save_model_info(dict(model=(args.model, model_kwargs)))
         first_epoch = 1
+
     print(logger.logdir)
 
-    if args.initialize_from_model != '':
-        print('Trying to load model weights from', args.initialize_from_model)
-        model.load_state_dict(logger.load_model_state_dict(
-            path=os.path.join(args.initialize_from_model, 'current_model.pt')),
-            strict=False)
+    ###############################################################################
+    # Explore ?
+    ###############################################################################
+    # TODO Unindent if __name__ == after merging
+    if explorer_mode:
+        explorer.analyze(args, dataset, model, optimizer)
+        sys.exit(0)
 
     ###############################################################################
     # Training code
     ###############################################################################
-    logger.save_model_state_dict(model.state_dict())
 
     # At any point you can hit Ctrl + C to break out of training early.
     try:
@@ -207,8 +212,8 @@ if __name__ == '__main__':
             #         logger.save_model_state_dict(model.state_dict())
             #         best_val_loss = val_loss['nll_per_w']
 
-            if lr_decay is not None:
-                lr_decay.step()
+            if scheduler is not None:
+                scheduler.step()
                 logger.lr = optimizer.param_groups[0]['lr']
 
     except KeyboardInterrupt:
