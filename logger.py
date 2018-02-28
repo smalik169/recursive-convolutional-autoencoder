@@ -31,21 +31,77 @@ def parse_resume_training(args):
         for k,v in forced_args.items():
             assert hasattr(state['args'], k)
             setattr(state['args'], k, v)
+    state['forced_args'] = forced_args
 
     # If some defaults are absent in state['args']
     for k,v in args.__dict__.items():
         if k not in state['args']:
             setattr(state['args'], k, v)
 
-    forced_model_state = None
+    state['forced_model_state'] = None
     if args.resume_training_force_model_state != '':
-        forced_model_state = eval('dict(%s)' % args.resume_training_force_model_state)
+        state['forced_model_state'] = eval('dict(%s)' % args.resume_training_force_model_state)
 
     args = state['args']
     print(args)
     print('\nWarning: Ignoring other input arguments!\n')
 
-    return args, forced_args, state, forced_model_state
+    return args, state
+
+def resume_training_innards(training_state, model, optimizer, scheduler):
+
+    # State has been loaded before model construction
+    logger = training_state['logger']
+    # state = logger.set_training_state(training_state, optimizer, model)
+
+    # Load optimizer parameters
+    optimizer.load_state_dict(training_state['optimizer'])
+    # https://discuss.pytorch.org/t/saving-and-loading-sgd-optimizer/2536
+    optimizer.state = defaultdict(dict, optimizer.state)
+
+    # Load model state
+    model_state = training_state.get('model_state', None)
+    forced_model_state = training_state.get('forced_model_state', None)
+    if model_state:
+        model.load_state(model_state)
+    if forced_model_state:
+        print('Forcing model state: %s' % forced_model_state)
+        model.load_state(forced_model_state)
+
+    # Load model params
+    model.load_state_dict(logger.load_model_state_dict(current=True))
+
+    if training_state['args'].initialize_from_model != '':
+        print('Trying to load model weights from', args.initialize_from_model)
+        model.load_state_dict(logger.load_model_state_dict(
+            path=os.path.join(args.initialize_from_model, 'current_model.pt')),
+            strict=False)
+
+    # Parse some of forced_args
+    forced_args = training_state['forced_args']
+    if forced_args and forced_args.has_key('lr'):
+        optimizer.param_groups[0]['lr'] = forced_args['lr']
+        logger.lr = forced_args['lr']
+
+    first_epoch = logger.epoch + 1
+
+    # Advance lr scheduler (it doesn't have load/save state_dict methods)
+    if scheduler is not None:
+        old_lr = optimizer.param_groups[0]['lr']
+        for _ in range(1, first_epoch):
+            scheduler.step()
+        new_lr = optimizer.param_groups[0]['lr']
+        logger.lr = new_lr
+        print('Decaying lr_rate to epoch %d: %.5f --> %.5f' %
+              (first_epoch, old_lr, new_lr))
+
+    # Lastly set rng
+    th = torch.cuda if training_state['args'].cuda else torch
+    th.set_rng_state(training_state['random'])
+    del training_state['random']
+
+    return dict(model=model, optimizer=optimizer, scheduler=scheduler,
+                logger=logger, first_epoch=first_epoch)
 
 
 class Writer(object):
@@ -163,20 +219,6 @@ class Logger(object):
         state['logger'].writers = {
             name: Writer(state['logger'].logdir + name) \
             for name in ['train', 'valid', 'test']}
-        return state
-
-    def set_training_state(self, state, optimizer, model):
-        th = torch.cuda if state['args'].cuda else torch
-        th.set_rng_state(state['random'])
-        del state['random']
-        optimizer.load_state_dict(state['optimizer'])
-        # https://discuss.pytorch.org/t/saving-and-loading-sgd-optimizer/2536
-        optimizer.state = defaultdict(dict, optimizer.state)
-        state['optimizer'] = optimizer
-
-        model_state = state.get('model_state', None)
-        if model_state:
-            model.load_state(model_state)
         return state
 
     def save_model_info(self, classes_with_kwargs):

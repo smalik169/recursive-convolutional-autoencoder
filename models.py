@@ -27,13 +27,14 @@ class ExpandConv1d(nn.Module):
 
 class Residual(nn.Module):
     def __init__(self, layer_proto, layer2_proto=None, out_relu=True,
-                 batch_norm=True):
+                 batch_norm=True, residual_connection=True):
         super(Residual, self).__init__()
         self.layer1 = layer_proto()
         self.relu = nn.ReLU()
         self.layer2 = layer2_proto() if layer2_proto else layer_proto()
         self.out_relu = out_relu
         self.batch_norm = batch_norm
+        self.residual_connection = residual_connection
 
         if batch_norm:
             self.bn1 = nn.BatchNorm1d(self.num_channels(self.layer1), momentum=0.1)
@@ -59,14 +60,17 @@ class Residual(nn.Module):
         if self.batch_norm:
             out = self.bn2(out)
 
-        out += residual
+        if self.residual_connection:
+            out += residual
         if self.out_relu:
             out = self.relu(out)
         return out
 
+
 class ByteCNNEncoder(nn.Module):
     def __init__(self, n, emsize, batch_norm, batch_norm_eval_updates=False,
-            padding_idx=None):
+                 padding_idx=None, linear_layers=False,
+                 compress_channels=None):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -81,8 +85,25 @@ class ByteCNNEncoder(nn.Module):
         self.prefix = nn.Sequential(*(residual_list(conv_proto, n//2)))
         self.recurrent = nn.Sequential(*(residual_list(conv_proto, n//2) + \
                                          [nn.MaxPool1d(kernel_size=2)]))
-        self.postfix = nn.Sequential(*(residual_list(linear_proto, n//2-1) + \
-                                       [Residual(linear_proto, out_relu=False, batch_norm=batch_norm)]))
+        self.linear_layers = linear_layers
+        self.compress_channels = compress_channels
+
+        if self.compress_channels:
+            em_in = emsize
+            postfix_layers = []
+            while em_in > self.compress_channels:
+                postfix_layers.append(Residual(
+                    lambda: nn.Conv1d(em_in, em_in, **conv_kwargs),
+                    lambda: nn.Conv1d(em_in, em_in // 2, **conv_kwargs),
+                    batch_norm=batch_norm, residual_connection=False))
+                em_in = em_in // 2
+            self.postfix = nn.Sequential(*(postfix_layers))
+
+        elif self.linear_layers:
+            self.postfix = nn.Sequential(*(residual_list(linear_proto, n//2-1) + \
+                                           [Residual(linear_proto, out_relu=False, batch_norm=batch_norm)]))
+        else:
+            self.postfix = None
 
         self.batch_norm = batch_norm
         self.batch_norm_eval_updates = batch_norm_eval_updates
@@ -96,11 +117,19 @@ class ByteCNNEncoder(nn.Module):
             x = self.recurrent(x)
 
         bsz = x.size(0)
-        return self.postfix(x.view(bsz, -1))
+
+        if self.compress_channels:
+            return self.postfix(x).view(bsz, -1)
+        elif self.linear_layers:
+            return self.postfix(x.view(bsz, -1))
+        else:
+            assert self.postfix is None
+            return x.view(bsz, -1)
 
 
 class ByteCNNDecoder(nn.Module):
-    def __init__(self, n, emsize, batch_norm):
+    def __init__(self, n, emsize, batch_norm, linear_layers=True,
+                 compress_channels=None, output_embeddings_init=None):
         super(ByteCNNDecoder, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -112,8 +141,6 @@ class ByteCNNDecoder(nn.Module):
         bn_proto = lambda c: nn.BatchNorm1d(c, momentum=0.1)
         residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) \
                                           for _ in xrange(k)]
-
-        self.prefix = nn.Sequential(*(residual_list(linear_proto, n//2)))
         if batch_norm:
             self.recurrent = nn.Sequential(
                 *([expand_proto(), bn_proto(emsize), nn.ReLU(), conv_proto(),
@@ -125,26 +152,66 @@ class ByteCNNDecoder(nn.Module):
                   residual_list(conv_proto, n//2-1)))
         self.postfix = nn.Sequential(*(residual_list(conv_proto, n//2)))
 
+        self.linear_layers = linear_layers
+        self.compress_channels = compress_channels
+
+        if self.compress_channels:
+            em_in = self.compress_channels
+            prefix_layers = []
+            while em_in < self.emsize:
+                prefix_layers.append(Residual(
+                    lambda: nn.Conv1d(em_in, em_in, **conv_kwargs),
+                    lambda: nn.Conv1d(em_in, em_in * 2, **conv_kwargs),
+                    batch_norm=batch_norm, residual_connection=False))
+                em_in = em_in * 2
+            self.prefix = nn.Sequential(*(prefix_layers))
+        elif self.linear_layers:
+            self.prefix = nn.Sequential(*(residual_list(linear_proto, n//2)))
+        else:
+            self.prefix = None
+
+        self.unembedding = None
+        if output_embeddings_init:
+            self.unembedding = nn.Linear(emsize, emsize)
+            self.unembedding.weight = output_embeddings_init.weight
+
     def forward(self, x, r):
-        x = self.prefix(x)
-        x = x.view(x.size(0), self.emsize, 4)
+        if self.compress_channels:
+            x = x.view(x.size(0), self.compress_channels, 4)
+            x = self.prefix(x)
+        elif self.linear_layers:
+            x = self.prefix(x)
+            x = x.view(x.size(0), self.emsize, 4)
+        else:
+            assert self.prefix is None
+            x = x.view(x.size(0), self.emsize, 4)
 
         for _ in xrange(r-2):
             x = self.recurrent(x)
 
-        return self.postfix(x)
+        x = self.postfix(x)
+
+        if self.unembedding:
+            x = self.unembedding(x.transpose(1,2).contiguous()).transpose(1,2).contiguous()
+        return x
 
 
 class ByteCNN(nn.Module):
     save_best = True
-    def __init__(self, n=8, emsize=256, batch_norm=True, ignore_index=-1, eos=0):  ## XXX Check default emsize
+    def __init__(self, n=8, emsize=256, batch_norm=True, ignore_index=-1, eos=0,
+                 linear_layers=True, compress_channels=None, output_embeddings=False):  ## XXX Check default emsize
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
         self.batch_norm = batch_norm
         self.encoder = ByteCNNEncoder(n, emsize, batch_norm=batch_norm,
-                padding_idx=(ignore_index if ignore_index >= 0 else None))
-        self.decoder = ByteCNNDecoder(n, emsize, batch_norm=batch_norm)
+                padding_idx=(ignore_index if ignore_index >= 0 else None),
+                linear_layers=linear_layers,
+                compress_channels=compress_channels)
+        self.decoder = ByteCNNDecoder(n, emsize, batch_norm=batch_norm,
+                                      linear_layers=linear_layers,
+                                      compress_channels=compress_channels,
+                                      output_embeddings_init=(self.encoder.embedding if output_embeddings else None))
         self.log_softmax = nn.LogSoftmax()
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
         self.eos = eos

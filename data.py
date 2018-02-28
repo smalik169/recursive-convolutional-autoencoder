@@ -14,56 +14,74 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import Variable
 
+# TODO Make sure those symbols are absent in the data!
+EOS = 0       # ASCII null symbol
+EMPTY = 7     # ASCII bell
+WILDCARD = 1  # ASCII start-of-heading (SOH)
+SAMPLE_SENTENCE = 'On a beautiful morning, a busty Amazon rode through a forest.'
 
-class UTF8File(object):
-    EOS = 0  # ASCII null symbol
-    EMPTY = 7 # XXX
-    def __init__(self, path, cuda, rng=None, fixed_len=None):
-        self.cuda = cuda
-        self.rng = np.random.RandomState(rng)
-        self.fixed_len = fixed_len
-
-        self.lines = {}
-	# Is there a cached dataset?
-        fname = os.path.basename(path)
-        base = os.path.dirname(path)
-        cached = [f for f in os.listdir(base) \
-                  if f.startswith(fname) and f.endswith('uint8')]
-        for c in cached:
-            key = int(c.split('.')[-2].replace('len', ''))
-            val = np.fromfile(os.path.join(base, c), dtype=np.uint8).reshape(-1, key)
-            if fixed_len is None or val.shape[1] <= fixed_len:
-                self.lines[key] = val
-            else:
-                print('Dropping matrix of size %s: too long' % str(val.shape))
-        if len(self.lines) > 0:
-            print('Data loaded from cached binary matrices.')
-            return
-
+class Cache(object):
+    @staticmethod
+    def byte_file_to_lines(path, max_len=None):
         lines_by_len = defaultdict(list)
         with codecs.open(path, 'r', 'utf-8') as f:
             for line in f:
-                bytes_ = [ord(c) for c in line.strip().encode('utf-8')] + [self.EOS]
-                bytes_ += [self.EMPTY] * (int(2 ** np.ceil(np.log2(len(bytes_)))) - len(bytes_))
+                bytes_ = [ord(c) for c in line.strip().encode('utf-8')] + [EOS]
+                power2_len = int(np.ceil(np.log2(len(bytes_))))
+                bytes_ += [EMPTY] * (2 ** power2_len - len(bytes_))
                 # Convnet reduces arbitrary length to 4
                 if len(bytes_) < 4:
                     continue
                 lines_by_len[len(bytes_)].append(bytes_)
         # Convert to ndarrays
-        self.lines = {}
-        for k,v in lines_by_len.items():
-            if fixed_len is None or len(v[0]) <= fixed_len:
-                self.lines[k] = np.asarray(v, dtype=np.uint8)
+        for k in lines_by_len.keys():
+            if max_len is None or k <= max_len:
+                lines_by_len[k] = np.asarray(lines_by_len[k], dtype=np.uint8)
             else:
-                print('Dropping matrix of size %s: too long' % str(len(v[0])))
-        # self.lines = {k: np.asarray(v, dtype=np.uint8) \
-        #               for k,v in lines_by_len.items()}
+                print('Dropping matrix of size %s: too long' % k)
+                del lines_by_len[k]
+        return lines_by_len
 
-        # # Cache data matrices
-        # for k, v in self.lines.items():
-        #     cached_path = path + ('.len%d.uint8' % k)
-        #     if not os.path.isfile(cached_path):
-        #         v.tofile(cached_path)
+    @staticmethod
+    def files(fpath):
+        dir_ = os.path.dirname(fpath)
+        base = os.path.basename(fpath)
+        return [(f, os.path.join(dir_, f)) for f in os.listdir(dir_) \
+                if f.startswith(base + '.len') and f.endswith('.uint8')]
+
+    @staticmethod
+    def build(fpath):
+        if len(Cache.files(fpath)) > 0:
+            return
+        lines = Cache.byte_file_to_lines(fpath, max_len=None)
+        # Cache data matrices
+        for k, v in lines.items():
+            cached_path = path + ('.len%d.uint8' % k)
+            if not os.path.isfile(cached_path):
+                v.tofile(cached_path)
+
+    @staticmethod
+    def load(fpath, max_len=None):
+        lines = {}
+        for name, path in Cache.files(fpath):
+            key = int(name.split('.')[-2].replace('len', ''))
+            val = np.fromfile(path, dtype=np.uint8).reshape(-1, key)
+            if max_len is None or val.shape[1] <= max_len:
+                lines[key] = val
+            else:
+                print('Dropping matrix of size %s: too long' % str(val.shape))
+        return lines
+
+
+class UTF8File(object):
+    def __init__(self, path, cuda, rng=None, fixed_len=None, use_cache=True):
+        self.cuda = cuda
+        self.rng = np.random.RandomState(rng)
+        self.fixed_len = fixed_len
+        if use_cache:
+            self.lines = Cache.load(path, max_len=fixed_len)
+        else:
+            self.lines = Cache.byte_file_to_lines(max_len=fixed_len)
 
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
@@ -71,7 +89,7 @@ class UTF8File(object):
     def maybe_pad(self, batch):
         if self.fixed_len:
             return np.pad(batch, ((0,0), (0, self.fixed_len - batch.shape[1])),
-                          'constant', constant_values=self.EMPTY)
+                          'constant', constant_values=EMPTY)
         else:
             return batch
 
@@ -103,14 +121,12 @@ class UTF8File(object):
                     batch_tensor = batch_tensor.cuda()
                 yield (batch_tensor, batch_tensor) #(source, target)
 
-    def sample_batch(self, bsz, sample_sentence=None):
-        if not sample_sentence:
-            sample_sentence = 'On a beautiful morning, a busty Amazon rode through a forest.'
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
         sample_sentence = sample_sentence.encode('utf-8')
         print("Source:", sample_sentence)
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
-        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [self.EOS] + \
-                             [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
+        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
+                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
                             dtype=np.uint8)
         assert bytes_.shape[1] == batch_len, bytes_.shape
         # batch_tensor = torch.from_numpy(bytes_).long() 
@@ -126,8 +142,6 @@ class UTF8File(object):
 
 
 class UTF8WordStarFile(object):
-    EOS = 0  # ASCII null symbol
-    EMPTY = 7 # XXX
     def __init__(self, path, cuda, rng=None, p=0.5):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
@@ -148,9 +162,9 @@ class UTF8WordStarFile(object):
                         source_bytes_ += bytes_
 
                 source_bytes_ = source_bytes_[:-1]
-                source_bytes_ += [self.EMPTY] * (len_ - len(source_bytes_))
+                source_bytes_ += [EMPTY] * (len_ - len(source_bytes_))
                 target_bytes_ = target_bytes_[:-1]
-                target_bytes_ += [self.EMPTY] * (len_ - len(target_bytes_))
+                target_bytes_ += [EMPTY] * (len_ - len(target_bytes_))
                 assert len(source_bytes_) == len(target_bytes_)
                 # Convnet reduces arbitrary length to 4
                 if len(source_bytes_) < 4:
@@ -191,21 +205,19 @@ class UTF8WordStarFile(object):
                 tgt = torch.from_numpy(self.lines[len_][1][inds]).long()
                 yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
-    def sample_batch(self, bsz, sample_sentence=None):
-        if not sample_sentence:
-            sample_sentence = 'On a beautiful morning, a busty Amazon rode through a forest.'
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
         sample_sentence = ' '.join(sample_sentence.strip().encode('utf-8').split())
         source_sentence = ' '.join(
                 [('*' * len(word) if len(word) < 6 and np.random.random() < 0.5 else word)
                     for word in sample_sentence.split()])
         # print("Source:", source_sentence)
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
-        source_bytes_ = [ord(c) for c in source_sentence] + [self.EOS]
-        source_bytes_ += [self.EMPTY] * (batch_len - len(source_bytes_))
+        source_bytes_ = [ord(c) for c in source_sentence] + [EOS]
+        source_bytes_ += [EMPTY] * (batch_len - len(source_bytes_))
         source_bytes_ = np.asarray([source_bytes_])
         target_bytes_ = np.asarray(
-                [[ord(c) for c in sample_sentence] + [self.EOS] + \
-                [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
+                [[ord(c) for c in sample_sentence] + [EOS] + \
+                [EMPTY] * (batch_len - len(sample_sentence) - 1)],
                 dtype=np.uint8)
         assert source_bytes_.shape[1] == batch_len
         # batch_tensor = torch.from_numpy(bytes_).long() 
@@ -218,14 +230,13 @@ class UTF8WordStarFile(object):
 
 
 class UTF8CharStarFile(UTF8File):
-    WILDCARD = 1  # ASCII start-of-heading (SOH)
     def __init__(self, path, cuda, p=0.5, **kwargs):
         super(UTF8CharStarFile, self).__init__(path, cuda, **kwargs)
         self.p = p
 
     def _get_mask(self, src):
         mask = (torch.rand(src.size()) < self.p)
-        mask = mask & (src != self.EMPTY)
+        mask = mask & (src != EMPTY)
         return mask
 
     def iter_epoch(self, bsz, evaluation=False):
@@ -236,7 +247,7 @@ class UTF8CharStarFile(UTF8File):
                     tgt = torch.from_numpy(batch).long()
                     src = tgt.clone()
                     mask = self._get_mask(src)
-                    src[mask] = self.WILDCARD
+                    src[mask] = WILDCARD
                     yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
         else:
             batch_inds = []
@@ -255,16 +266,14 @@ class UTF8CharStarFile(UTF8File):
                 tgt = torch.from_numpy(batch).long()
                 src = tgt.clone()
                 mask = self._get_mask(src)
-                src[mask] = self.WILDCARD
+                src[mask] = WILDCARD
                 yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
-    def sample_batch(self, bsz, sample_sentence=None):
-        if not sample_sentence:
-            sample_sentence = 'On a beautiful morning, a busty Amazon rode through a forest.'
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
         sample_sentence = sample_sentence.encode('utf-8')
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
-        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [self.EOS] + \
-                             [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
+        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
+                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
                             dtype=np.uint8)
         assert bytes_.shape[1] == batch_len
         # batch_tensor = torch.from_numpy(bytes_).long() 
@@ -275,26 +284,28 @@ class UTF8CharStarFile(UTF8File):
         tgt = torch.from_numpy(batch).long()
         src = tgt.clone()
         mask = (torch.rand(src.size()) < self.p)
-        mask = mask & (src != self.EMPTY)
+        mask = mask & (src != EMPTY)
         src[mask] = ord('*')
         # print("Source:", ''.join(map(chr, src[0].numpy())))
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 
 class UTF8CharVarStarFile(UTF8CharStarFile):
-    WILDCARD = 1  # ASCII start-of-heading (SOH)
     def _get_mask(self, src):
-        # Half has probs p, half probs drawn uniformly [0,p]
-        bsz = src.size(0)
-        sent_probs = torch.cat([torch.rand(bsz // 2, 1) * self.p,
-                                torch.ones(bsz - (bsz // 2), 1) * self.p],
-                               dim=0)
+        # All probs drawn uniformly [0,p]
+        sent_probs = torch.rand(src.size(0), 1) * self.p
         mask = (torch.rand(src.size()) < sent_probs)
-        mask = mask & (src != self.EMPTY)
+        mask = mask & (src != EMPTY)
         return mask
 
+
 class UTF8Corpus(object):
-    def __init__(self, path, cuda, file_class=UTF8File, rng=None, fixed_len=None):
-        self.train = file_class(path + 'train.txt', cuda, rng=rng, fixed_len=fixed_len)
-        self.valid = file_class(path + 'valid.txt', cuda, rng=rng, fixed_len=fixed_len)
-        self.test = file_class(path + 'test.txt', cuda, rng=rng, fixed_len=fixed_len)
+    def __init__(self, path, cuda, file_class=UTF8File, rng=None, fixed_len=None,
+                 use_cache=True, sets=dict(train=True, valid=True, test=True)):
+        if use_cache:
+            Cache.build(path + 'train.txt')
+            Cache.build(path + 'valid.txt')
+            Cache.build(path + 'test.txt')
+        self.train = file_class(path + 'train.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['train'] else None
+        self.valid = file_class(path + 'valid.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['valid'] else None
+        self.test = file_class(path + 'test.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['test'] else None
