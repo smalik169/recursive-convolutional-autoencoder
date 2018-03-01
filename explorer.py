@@ -12,34 +12,40 @@ import data
 import models
 
 
-def analyze(args, dataset, model, optimizer):
-    
-    print('######################################################################')
-    print('# Report validation accuracy')
-    print('######################################################################')
-    
+def _header(h):
+    return '\n'.join(['#' * 79, '# ' + h, '#' * 79])
+
+def save_latent_codes(args, dataset, model, optimizer):
+    print(_header('Save latent codes'))
+    model.train()
+    features = []
+    for (src, _) in dataset.valid.iter_epoch(bsz=128, evaluation=False):
+        src = Variable(src, volatile=True)
+        r_src = model.num_recurrences(src)
+        batch_features = model.encoder(src, r_src)
+        features.append(batch_features.data.cpu().numpy())
+    print(features[0].shape)
+    features = np.vstack(features)
+    print(features.shape)
+    features.tofile('valid_features.npy')
+
+def report_validation_accuracy(args, dataset, model, optimizer):
+    print(_header('Report validation accuracy'))
     val_loss = model.eval_on(
         dataset.valid.iter_epoch(args.batch_size, evaluation=True),
         switch_to_evalmode=False)
     loss_str = ' : '.join(
         [' {} {:5.2f}'.format(k, v) for k, v in dict(val_loss).items()])
     loss_str = ('valid {}'.format(loss_str))
-    print()
-    print('-' * len(loss_str))
-    print(loss_str)
-    print('-' * len(loss_str))
-    print()
-    
-    print('######################################################################')
-    print('# Interpolate between sentences')
-    print('######################################################################')
+    print('\n', '-' * len(loss_str), loss_str, '-' * len(loss_str), '\n')
+
+def interpolate_between_sentences(args, dataset, model, optimizer):
+    print(_header('Interpolate between sentences'))
     
     # NOTE: Keed sent lengths within a pair fairly similar
     sent_pairs = [('I had a great time at the restaurant, the food was great!',
                    'I had an awful time at the diner, the meal was really bad.')]
-    
     model.train()
-    
     for (s1, s2) in sent_pairs:
         codes = []
         for sent in [s1, s2]:
@@ -69,12 +75,9 @@ def analyze(args, dataset, model, optimizer):
             pred = pred[:pred.index(data.EOS)] if data.EOS in pred else pred
             pred = repr(''.join([chr(c) for c in pred]))
             print(pred) # decoded[r].append(pred)
-    
-    
-    print('######################################################################')
-    print('# Average line length')
-    print('######################################################################')
-    
+
+def average_line_length(args, dataset, model, optimizer):
+    print(_header('Average line length'))
     sum_ = 0
     lens = 0
     for subset in [dataset.train, dataset.valid, dataset.test]:
@@ -82,23 +85,20 @@ def analyze(args, dataset, model, optimizer):
             sum_ += np.sum(val != data.EMPTY)
             lens += val.shape[0]
     print('\nAverage sentence length (w/o padding): %.2f\n' % (1.0 * sum_ / lens))
-    
-    # print('######################################################################')
-    # print('# Count bytes in the data')
-    # print('######################################################################')
-    # 
-    # byte_counter = Counter()
-    # for subset in [dataset.train, dataset.valid, dataset.test]:
-    #     for val in subset.lines.values():
-    #         byte_counter.update(dict(zip(*np.unique(val, return_counts=True))))
-    # print('')
-    # for k in range(256):
-    #     print('{: >3}: {: >10}'.format(k, byte_counter.get(k, 0)))
-    # print('')
-    
-    print('######################################################################')
-    print('# Decode sample sentences')
-    print('######################################################################')
+   
+def count_bytes_in_data(args, dataset, model, optimizer):
+    print(_header('Count bytes in data'))
+    byte_counter = Counter()
+    for subset in [dataset.train, dataset.valid, dataset.test]:
+        for val in subset.lines.values():
+            byte_counter.update(dict(zip(*np.unique(val, return_counts=True))))
+    print('')
+    for k in range(256):
+        print('{: >3}: {: >10}'.format(k, byte_counter.get(k, 0)))
+    print('')
+   
+def decode_sample_sentences(args, dataset, model, optimizer):
+    print(_header('Decode sample sentences'))
     
     # Decode a sentence of my choice.
     sentences = [
@@ -113,10 +113,9 @@ def analyze(args, dataset, model, optimizer):
         print(model.try_on(dataset.valid.sample_batch(args.batch_size, sent),
                            switch_to_evalmode=False)[0])
         print('-----')
-    
-    print('######################################################################')
-    print('# Decode to different length')
-    print('######################################################################')
+   
+def decode_to_different_length(args, dataset, model, optimizer):
+    print(_header('Decode to different length'))
     
     def try_on_varlen(model, batch_iterator):
         """Mimics model's try_on() on a range of target lengths."""
@@ -146,21 +145,18 @@ def analyze(args, dataset, model, optimizer):
                                    switch_to_evalmode=False, r_tgt=r)[0]
             print('{: <4}'.format(r), decoded)
         print('-----')
-    
-    print('######################################################################')
-    print('# Decode from noise (VAE)')
-    print('######################################################################')
-    
+   
+def decode_from_noise_vae(args, dataset, model, optimizer):
+    print(_header('Decode from noise (VAE)'))
     print('\n\n')
     for _ in range(10):
         decoded = model.try_on(dataset.valid.sample_batch(args.batch_size),
                                switch_to_evalmode=False, first_sample_random=True)[0]
         print(decoded)
         print('-----')
-    
-    print('######################################################################')
-    print('# Decode from noise')
-    print('######################################################################')
+   
+def decode_from_noise(args, dataset, model, optimizer):
+    print(_header('Decode from noise'))
     
     def try_on_sampledhid(model, hid):
         """Mimics model's try_on() on a range of target lengths."""
@@ -191,3 +187,16 @@ def analyze(args, dataset, model, optimizer):
                 print('{: <4}'.format(r), decoded[r][i])
             print('\n')
         print('\n')
+
+def analyze(args, dataset, model, optimizer):
+    save_latent_codes(args, dataset, model, optimizer)
+    report_validation_accuracy(args, dataset, model, optimizer)
+    interpolate_between_sentences(args, dataset, model, optimizer)
+    average_line_length(args, dataset, model, optimizer)
+    # count_bytes_in_data(args, dataset, model, optimizer)
+    decode_sample_sentences(args, dataset, model, optimizer)
+    decode_to_different_length(args, dataset, model, optimizer)
+    decode_from_noise_vae(args, dataset, model, optimizer)
+    decode_from_noise(args, dataset, model, optimizer)
+    
+    
