@@ -73,6 +73,72 @@ class Cache(object):
         return lines
 
 
+class RandomFile(object):
+    def __init__(self, path, cuda, rng=None, fixed_len=None,
+                 use_cache=False, max_len=128, lowest_byte=32, highest_byte=122):
+        if 'valid' in path or 'test' in path:
+            self.num_samples = 10000
+        elif 'train' in path:
+            self.num_samples = 2 * 10**6
+        else:
+            raise ValueError
+        del use_cache
+        self.cuda = cuda
+        self.rng = np.random.RandomState(rng)
+        self.fixed_len = fixed_len
+        self.max_len = max_len
+        self.lowest_byte = lowest_byte
+        self.highest_byte = highest_byte
+
+    def get_num_batches(self, bsz):
+        return self.num_samples // bsz
+
+    def maybe_pad(self, batch):
+        if self.fixed_len:
+            return np.pad(batch, ((0,0), (0, self.fixed_len - batch.shape[1])),
+                          'constant', constant_values=EMPTY)
+        else:
+            return batch
+
+    def iter_epoch(self, bsz, evaluation=False):
+        is_power_of_2 = lambda x: 2**int(np.log2(x)) == x
+        assert self.max_len is None or is_power_of_2(self.max_len)
+        assert self.fixed_len is None or is_power_of_2(self.fixed_len)
+        if self.fixed_len is not None:
+            lengths = [self.fixed_len]
+        else:
+            log_len = int(np.log2(self.max_len))
+            lengths = np.logspace(2, log_len, log_len-1, base=2)
+
+        for _ in xrange(self.get_num_batches(bsz)):
+            l = int(self.rng.choice(lengths))
+            batch = self.rng.randint(
+                self.lowest_byte, self.highest_byte+1, (bsz, l), dtype=np.uint8)
+            batch_tensor = torch.from_numpy(batch).long()
+            if self.cuda:
+                batch_tensor = batch_tensor.cuda()
+            yield (batch_tensor, batch_tensor) #(source, target)
+
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
+        sample_sentence = sample_sentence.encode('utf-8')
+        print("Source:", sample_sentence)
+        batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
+
+        batch = self.rng.randint(
+            self.lowest_byte, self.highest_byte+1, (bsz, batch_len), dtype=np.uint8)
+        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
+                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
+                            dtype=np.uint8)
+        assert bytes_.shape[1] == batch_len, bytes_.shape
+        batch[0] = bytes_
+        batch = self.maybe_pad(batch)
+        batch_tensor = torch.from_numpy(batch).long()
+
+        if self.cuda:
+            batch_tensor = batch_tensor.cuda()
+        yield (batch_tensor, batch_tensor) #(source, target)
+
+
 class UTF8File(object):
     def __init__(self, path, cuda, rng=None, fixed_len=None, use_cache=True):
         self.cuda = cuda

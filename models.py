@@ -284,7 +284,7 @@ class ByteCNN(nn.Module):
     def num_recurrences(self, x):
         rfloat = np.log2(x.size(-1))
         r = int(rfloat)
-        assert float(r) == rfloat
+        assert float(r) == rfloat, x.size(-1)
         return r
 
     def _encode_decode(self, src, tgt, r_tgt=None):
