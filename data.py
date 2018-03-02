@@ -73,9 +73,26 @@ class Cache(object):
         return lines
 
 
+class RegularizedFile(object):
+
+    def __init__(self, *args, **kwargs):
+        self.utf8file = UTF8File(*args, **kwargs)
+        self.random_file = RandomFile(*args, **kwargs)
+
+    def iter_epoch(self, *args, **kwargs):
+        it1 = self.utf8file.iter_epoch(*args, **kwargs)
+        it2 = self.random_file.iter_epoch(*args, **kwargs)
+        for a,b in zip(it1, it2):
+            yield a
+            yield b
+
+    def get_num_batches(self, *args, **kwargs):
+        return self.utf8file.get_num_batches(*args, **kwargs) + self.random_file.get_num_batches(*args, **kwargs)
+
+
 class RandomFile(object):
     def __init__(self, path, cuda, rng=None, fixed_len=None,
-                 use_cache=False, max_len=128, lowest_byte=32, highest_byte=122):
+                 use_cache=False, max_len=64, lowest_byte=32, highest_byte=122):
         if 'valid' in path or 'test' in path:
             self.num_samples = 10000
         elif 'train' in path:
@@ -123,6 +140,13 @@ class RandomFile(object):
         sample_sentence = sample_sentence.encode('utf-8')
         print("Source:", sample_sentence)
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
+        if self.fixed_len:
+            batch_len = self.fixed_len
+        elif self.max_len:
+            batch_len = min(batch_len, self.max_len)
+
+        if len(sample_sentence) > batch_len:
+            sample_sentence = sample_sentence[:(batch_len-1)]
 
         batch = self.rng.randint(
             self.lowest_byte, self.highest_byte+1, (bsz, batch_len), dtype=np.uint8)
