@@ -12,6 +12,14 @@ import data
 import models
 
 
+sentences = [
+    "I'm so broke I can't even pay attention.",
+    "One should always be in love. That is the reason one should never marry.",
+    "We cannot do everything at once, but we can do something at once.",
+    "Young man, in mathematics you don't understand things. You just get used to them.",
+    "Szymon jedzie rowerem w dalekie trasy. Podziwia widoki i cieszy go szum wiatru."]
+
+
 def _header(h):
     return '\n'.join(['#' * 79, '# ' + h, '#' * 79])
 
@@ -29,8 +37,9 @@ def save_latent_codes(args, dataset, model, optimizer):
     print(features.shape)
     features.tofile('valid_features.npy')
 
-def report_validation_accuracy(args, dataset, model, optimizer):
-    print(_header('Report validation accuracy'))
+def report_validation_accuracy(args, dataset, model, optimizer, header=True):
+    if header:
+        print(_header('Report validation accuracy'))
     val_loss = model.eval_on(
         dataset.valid.iter_epoch(args.batch_size, evaluation=True),
         switch_to_evalmode=False)
@@ -101,12 +110,6 @@ def decode_sample_sentences(args, dataset, model, optimizer):
     print(_header('Decode sample sentences'))
     
     # Decode a sentence of my choice.
-    sentences = [
-        "I'm so broke I can't even pay attention.",
-        "One should always be in love. That is the reason one should never marry.",
-        "We cannot do everything at once, but we can do something at once.",
-        "Young man, in mathematics you don't understand things. You just get used to them.",
-        "Szymon jedzie rowerem w dalekie trasy. Podziwia widoki i cieszy go szum wiatru."]
     
     for sent in sentences:
         print(repr(sent))
@@ -188,15 +191,30 @@ def decode_from_noise(args, dataset, model, optimizer):
             print('\n')
         print('\n')
 
+def validation_accuracy_specific_length(args, dataset, model, optimizer,
+                                        min_len=4, max_len=128):
+    print(_header('Validation accuracy (len %d to %d)' % (min_len, max_len)))
+    data_kwargs = eval('dict(%s)' % args.data_kwargs)
+    data_kwargs.update(dict(min_len=min_len, max_len=max_len,
+                            sets=dict(train=False, valid=True, test=False)))
+    val_dataset = data.UTF8Corpus(
+            args.data, cuda=args.cuda,
+            file_class=getattr(data, args.file_class),
+            **data_kwargs)
+    report_validation_accuracy(args, val_dataset, model, optimizer, header=False)
+
 def analyze(args, dataset, model, optimizer):
-    save_latent_codes(args, dataset, model, optimizer)
-    report_validation_accuracy(args, dataset, model, optimizer)
-    interpolate_between_sentences(args, dataset, model, optimizer)
-    average_line_length(args, dataset, model, optimizer)
-    # count_bytes_in_data(args, dataset, model, optimizer)
-    decode_sample_sentences(args, dataset, model, optimizer)
-    decode_to_different_length(args, dataset, model, optimizer)
-    decode_from_noise_vae(args, dataset, model, optimizer)
-    decode_from_noise(args, dataset, model, optimizer)
+    innards = dict(args=args, dataset=dataset, model=model, optimizer=optimizer)
+    for l in [16, 32, 64, 128, 256, 512]:
+        validation_accuracy_specific_length(min_len=l, max_len=l, **innards)
+    save_latent_codes(**innards)
+    report_validation_accuracy(**innards)
+    interpolate_between_sentences(**innards)
+    average_line_length(**innards)
+    # count_bytes_in_data(**innards)
+    decode_sample_sentences(**innards)
+    decode_to_different_length(**innards)
+    decode_from_noise_vae(**innards)
+    decode_from_noise(**innards)
     
     

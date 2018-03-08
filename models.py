@@ -89,12 +89,13 @@ class Residual(nn.Module):
 
 
 class ByteCNNEncoder(nn.Module):
-    def __init__(self, n, emsize, batch_norm, instance_norm,
+    def __init__(self, n, emsize, vocab_size, batch_norm, instance_norm,
                  batch_norm_eval_updates=False, padding_idx=None,
                  use_linear_layers=True, compress_channels=None):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
         self.emsize = emsize
+        self.vocab_size = vocab_size
         assert n % 2 == 0, 'n should be a multiple of 2'
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
@@ -104,7 +105,7 @@ class ByteCNNEncoder(nn.Module):
                          batch_norm=batch_norm, instance_norm=instance_norm)
                 for i in xrange(k)]
 
-        self.embedding = nn.Embedding(emsize, emsize, padding_idx=padding_idx)
+        self.embedding = nn.Embedding(vocab_size, emsize, padding_idx=padding_idx)
         self.prefix = nn.Sequential(
                 *(residual_list(conv_proto, n//2, batch_norm, instance_norm)))
         self.recurrent = nn.Sequential(
@@ -160,12 +161,13 @@ class ByteCNNEncoder(nn.Module):
 
 
 class ByteCNNDecoder(nn.Module):
-    def __init__(self, n, emsize, batch_norm, instance_norm,
+    def __init__(self, n, emsize, vocab_size, batch_norm, instance_norm,
                  use_linear_layers=True,
                  compress_channels=None, output_embeddings_init=None):
         super(ByteCNNDecoder, self).__init__()
         self.n = n
         self.emsize = emsize
+        self.vocab_size = vocab_size
         assert n % 2 == 0, 'n should be a multiple of 2'
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
@@ -222,7 +224,7 @@ class ByteCNNDecoder(nn.Module):
 
         self.output_embedding = None
         if output_embeddings_init:
-            self.output_embedding = nn.Linear(emsize, emsize)
+            self.output_embedding = nn.Linear(emsize, vocab_size)
             self.output_embedding.weight = output_embeddings_init.weight
 
     def forward(self, x, r):
@@ -249,7 +251,7 @@ class ByteCNNDecoder(nn.Module):
 
 class ByteCNN(nn.Module):
     save_best = True
-    def __init__(self, n=8, emsize=256,
+    def __init__(self, n=8, emsize=256, vocab_size=256,
             batch_norm=True, instance_norm=False,
             ignore_index=-1, eos=0,
             use_linear_layers=True, compress_channels=None,
@@ -259,13 +261,13 @@ class ByteCNN(nn.Module):
         self.emsize = emsize
         self.batch_norm = batch_norm
         self.instance_norm = instance_norm
-        self.encoder = ByteCNNEncoder(n, emsize, batch_norm=batch_norm,
+        self.encoder = ByteCNNEncoder(n, emsize, vocab_size, batch_norm=batch_norm,
                 instance_norm=instance_norm,
                 padding_idx=(ignore_index if ignore_index >= 0 else None),
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels)
 
-        self.decoder = ByteCNNDecoder(n, emsize,
+        self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
                 batch_norm=batch_norm, instance_norm=instance_norm,
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,

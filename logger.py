@@ -82,7 +82,7 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
     # Advance lr scheduler (it doesn't have load/save state_dict methods)
     if scheduler is not None:
         old_lr = optimizer.param_groups[0]['lr']
-        for _ in range(1, first_epoch):
+        for _ in range(1, first_epoch + 1):
             scheduler.step()
         new_lr = optimizer.param_groups[0]['lr']
         logger.lr = new_lr

@@ -22,7 +22,7 @@ SAMPLE_SENTENCE = 'On a beautiful morning, a busty Amazon rode through a forest.
 
 class Cache(object):
     @staticmethod
-    def byte_file_to_lines(path, max_len=None):
+    def byte_file_to_lines(path, min_len=4, max_len=np.inf):
         lines_by_len = defaultdict(list)
         with codecs.open(path, 'r', 'utf-8') as f:
             for line in f:
@@ -30,12 +30,12 @@ class Cache(object):
                 power2_len = int(np.ceil(np.log2(len(bytes_))))
                 bytes_ += [EMPTY] * (2 ** power2_len - len(bytes_))
                 # Convnet reduces arbitrary length to 4
-                if len(bytes_) < 4:
-                    continue
+                ### if len(bytes_) < 4:
+                ###     continue
                 lines_by_len[len(bytes_)].append(bytes_)
         # Convert to ndarrays
         for k in lines_by_len.keys():
-            if max_len is None or k <= max_len:
+            if min_len <= k <= max_len:
                 lines_by_len[k] = np.asarray(lines_by_len[k], dtype=np.uint8)
             else:
                 print('Dropping matrix of size %s: too long' % k)
@@ -53,7 +53,7 @@ class Cache(object):
     def build(fpath):
         if len(Cache.files(fpath)) > 0:
             return
-        lines = Cache.byte_file_to_lines(fpath, max_len=None)
+        lines = Cache.byte_file_to_lines(fpath, max_len=np.inf)
         # Cache data matrices
         for k, v in lines.items():
             cached_path = path + ('.len%d.uint8' % k)
@@ -61,12 +61,12 @@ class Cache(object):
                 v.tofile(cached_path)
 
     @staticmethod
-    def load(fpath, max_len=None):
+    def load(fpath, min_len=4, max_len=np.inf):
         lines = {}
         for name, path in Cache.files(fpath):
             key = int(name.split('.')[-2].replace('len', ''))
             val = np.fromfile(path, dtype=np.uint8).reshape(-1, key)
-            if max_len is None or val.shape[1] <= max_len:
+            if min_len <= val.shape[1] <= max_len:
                 lines[key] = val
             else:
                 print('Dropping matrix of size %s: too long' % str(val.shape))
@@ -164,14 +164,19 @@ class RandomFile(object):
 
 
 class UTF8File(object):
-    def __init__(self, path, cuda, rng=None, fixed_len=None, use_cache=True):
+    def __init__(self, path, cuda, rng=None, fixed_len=None,
+                 min_len=4, max_len=np.inf, use_cache=True):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
         self.fixed_len = fixed_len
+        self.min_len = min_len
+        self.max_len = fixed_len or max_len
+        if self.max_len is not None and self.fixed_len is not None:
+            raise ValueError
         if use_cache:
-            self.lines = Cache.load(path, max_len=fixed_len)
+            self.lines = Cache.load(path, min_len=min_len, max_len=self.max_len)
         else:
-            self.lines = Cache.byte_file_to_lines(max_len=fixed_len)
+            self.lines = Cache.byte_file_to_lines(min_len=min_len, max_len=self.max_len)
 
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
@@ -390,12 +395,15 @@ class UTF8CharVarStarFile(UTF8CharStarFile):
 
 
 class UTF8Corpus(object):
-    def __init__(self, path, cuda, file_class=UTF8File, rng=None, fixed_len=None,
+    def __init__(self, path, cuda, file_class=UTF8File, rng=None,
+                 fixed_len=None, min_len=4, max_len=np.inf,
                  use_cache=True, sets=dict(train=True, valid=True, test=True)):
         if use_cache:
             Cache.build(path + 'train.txt')
             Cache.build(path + 'valid.txt')
             Cache.build(path + 'test.txt')
-        self.train = file_class(path + 'train.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['train'] else None
-        self.valid = file_class(path + 'valid.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['valid'] else None
-        self.test = file_class(path + 'test.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['test'] else None
+        subset_kwargs = dict(rng=rng, fixed_len=fixed_len,
+            min_len=min_len, max_len=max_len, use_cache=use_cache)
+        self.train = file_class(path + 'train.txt', cuda, **subset_kwargs) if sets['train'] else None
+        self.valid = file_class(path + 'valid.txt', cuda, **subset_kwargs) if sets['valid'] else None
+        self.test = file_class(path + 'test.txt', cuda, **subset_kwargs) if sets['test'] else None
