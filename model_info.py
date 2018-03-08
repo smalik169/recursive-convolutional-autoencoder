@@ -1,6 +1,8 @@
+import argparse
 import os
 import sys
 from pprint import pprint
+
 import tabulate
 
 import torch
@@ -12,7 +14,6 @@ def model_details(model_dir):
     state_file = os.path.join(model_dir, 'training_state.pkl')
     if not os.path.isfile(state_file):
         return None
-
     state = logger.Logger.load_training_state(model_dir)
     details = dict(name=model_dir)
     log = state.get('logger', None)
@@ -25,24 +26,49 @@ def model_details(model_dir):
     # print model_dir.split('/')[1], epoch, top_dir
     return details
 
-def print_model_summary():
-    dirs = [d for d in os.listdir('.') if d.startswith('2018-')]
-    dirs = sorted(dirs, key=lambda r: r[1:])
-    detail_dicts = [(d, model_details(d)) for d in dirs]
-    rows = [[d['name'], d['data'], d['model'], d['file'], d['epoch'], d['args']] \
-            for (name,d) in detail_dicts if d is not None]
+def print_summary(exp_all, include_args=False):
+    exp_valid = [(name, d) for (name, d) in exp_all if d is not None]
+    exp_empty = [(name, d) for (name, d) in exp_all if d is None]
+    columns = ('name', 'data', 'model', 'file', 'epoch')
+    if include_args:
+        columns += ('args',)
+    rows = [[d[col] for col in columns] for (name,d) in exp_valid]
     print tabulate.tabulate(rows)
-    print '-' * 20
-    print 'Broken experiments:'
-    for name,d in detail_dicts:
-        if d is None:
+    if exp_empty:
+        print 'Empty experiments:'
+        for (name, _) in exp_empty:
             print name
 
-# print_model_summary()
 
-for model_dir in sys.argv[1:]:
-    details = model_details(model_dir)
-    if details is None:
-        print '<EMPTY>'
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description='Byte-level CNN model manager')
+    parser.add_argument('dirs', type=str, nargs='+')
+    parser.add_argument('--table', action='store_true', default=False,
+                        help='Print summary table')
+    parser.add_argument('--args', action='store_true', default=False,
+                        help='Print all args for an experiment')
+    args = parser.parse_args()
+    
+    parser = argparse.ArgumentParser(description='Byte-level CNN model manager')
+    parser.add_argument('dirs', type=str, nargs='+')
+    parser.add_argument('--table', action='store_true', default=False,
+                        help='Print summary table')
+    parser.add_argument('--args', action='store_true', default=False,
+                        help='Print all args for an experiment')
+    args = parser.parse_args()
+
+    # dirs = [d for d in os.listdir('.') if d.startswith('2018-')]
+    exp_details = [(name, model_details(name)) for name in args.dirs]
+    if args.table:
+        print_summary(exp_details, include_args=args.args)
     else:
-        pprint(details)
+        for (name, d) in exp_details:
+            print name
+            if d is None:
+                print '  <EMPTY>'
+                continue
+            del d['name']
+            if not args.args:
+                del d['args']
+            pprint(d, indent=2, width=60)
