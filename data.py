@@ -142,7 +142,7 @@ class UTF8File(object):
 
 
 class UTF8WordStarFile(object):
-    def __init__(self, path, cuda, rng=None, p=0.5, max_w_len=6):
+    def __init__(self, path, cuda, rng=None, p=0.2, max_w_len=1000, fixed_len=None, use_cache=True):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
         self.p = p
@@ -215,8 +215,8 @@ class UTF8WordStarFile(object):
     def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
         sample_sentence = sample_sentence.encode('utf-8')
         batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
-        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [self.EOS] + \
-                             [self.EMPTY] * (batch_len - len(sample_sentence) - 1)],
+        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
+                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
                             dtype=np.uint8)
         assert bytes_.shape[1] == batch_len, bytes_.shape
         # batch_tensor = torch.from_numpy(bytes_).long() 
