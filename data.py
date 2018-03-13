@@ -22,7 +22,7 @@ SAMPLE_SENTENCE = 'On a beautiful morning, a busty Amazon rode through a forest.
 
 class Cache(object):
     @staticmethod
-    def byte_file_to_lines(path, max_len=None):
+    def byte_file_to_lines(path, min_len=4, max_len=np.inf):
         lines_by_len = defaultdict(list)
         with codecs.open(path, 'r', 'utf-8') as f:
             for line in f:
@@ -30,12 +30,12 @@ class Cache(object):
                 power2_len = int(np.ceil(np.log2(len(bytes_))))
                 bytes_ += [EMPTY] * (2 ** power2_len - len(bytes_))
                 # Convnet reduces arbitrary length to 4
-                if len(bytes_) < 4:
-                    continue
+                ### if len(bytes_) < 4:
+                ###     continue
                 lines_by_len[len(bytes_)].append(bytes_)
         # Convert to ndarrays
         for k in lines_by_len.keys():
-            if max_len is None or k <= max_len:
+            if min_len <= k <= max_len:
                 lines_by_len[k] = np.asarray(lines_by_len[k], dtype=np.uint8)
             else:
                 print('Dropping matrix of size %s: too long' % k)
@@ -53,7 +53,7 @@ class Cache(object):
     def build(fpath):
         if len(Cache.files(fpath)) > 0:
             return
-        lines = Cache.byte_file_to_lines(fpath, max_len=None)
+        lines = Cache.byte_file_to_lines(fpath, max_len=np.inf)
         # Cache data matrices
         for k, v in lines.items():
             cached_path = path + ('.len%d.uint8' % k)
@@ -61,27 +61,122 @@ class Cache(object):
                 v.tofile(cached_path)
 
     @staticmethod
-    def load(fpath, max_len=None):
+    def load(fpath, min_len=4, max_len=np.inf):
         lines = {}
         for name, path in Cache.files(fpath):
             key = int(name.split('.')[-2].replace('len', ''))
             val = np.fromfile(path, dtype=np.uint8).reshape(-1, key)
-            if max_len is None or val.shape[1] <= max_len:
+            if min_len <= val.shape[1] <= max_len:
                 lines[key] = val
             else:
                 print('Dropping matrix of size %s: too long' % str(val.shape))
         return lines
 
 
-class UTF8File(object):
-    def __init__(self, path, cuda, rng=None, fixed_len=None, use_cache=True):
+class RegularizedFile(object):
+
+    def __init__(self, *args, **kwargs):
+        self.utf8file = UTF8File(*args, **kwargs)
+        self.random_file = RandomFile(*args, **kwargs)
+
+    def iter_epoch(self, *args, **kwargs):
+        it1 = self.utf8file.iter_epoch(*args, **kwargs)
+        it2 = self.random_file.iter_epoch(*args, **kwargs)
+        for a,b in zip(it1, it2):
+            yield a
+            yield b
+
+    def get_num_batches(self, *args, **kwargs):
+        return self.utf8file.get_num_batches(*args, **kwargs) + self.random_file.get_num_batches(*args, **kwargs)
+
+
+class RandomFile(object):
+    def __init__(self, path, cuda, rng=None, fixed_len=None,
+                 use_cache=False, max_len=64, lowest_byte=32, highest_byte=122):
+        if 'valid' in path or 'test' in path:
+            self.num_samples = 10000
+        elif 'train' in path:
+            self.num_samples = 2 * 10**6
+        else:
+            raise ValueError
+        del use_cache
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
         self.fixed_len = fixed_len
-        if use_cache:
-            self.lines = Cache.load(path, max_len=fixed_len)
+        self.max_len = max_len
+        self.lowest_byte = lowest_byte
+        self.highest_byte = highest_byte
+
+    def get_num_batches(self, bsz):
+        return self.num_samples // bsz
+
+    def maybe_pad(self, batch):
+        if self.fixed_len:
+            return np.pad(batch, ((0,0), (0, self.fixed_len - batch.shape[1])),
+                          'constant', constant_values=EMPTY)
         else:
-            self.lines = Cache.byte_file_to_lines(max_len=fixed_len)
+            return batch
+
+    def iter_epoch(self, bsz, evaluation=False):
+        is_power_of_2 = lambda x: 2**int(np.log2(x)) == x
+        assert self.max_len is None or is_power_of_2(self.max_len)
+        assert self.fixed_len is None or is_power_of_2(self.fixed_len)
+        if self.fixed_len is not None:
+            lengths = [self.fixed_len]
+        else:
+            log_len = int(np.log2(self.max_len))
+            lengths = np.logspace(2, log_len, log_len-1, base=2)
+
+        for _ in xrange(self.get_num_batches(bsz)):
+            l = int(self.rng.choice(lengths))
+            batch = self.rng.randint(
+                self.lowest_byte, self.highest_byte+1, (bsz, l), dtype=np.uint8)
+            batch_tensor = torch.from_numpy(batch).long()
+            if self.cuda:
+                batch_tensor = batch_tensor.cuda()
+            yield (batch_tensor, batch_tensor) #(source, target)
+
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
+        sample_sentence = sample_sentence.encode('utf-8')
+        print("Source:", sample_sentence)
+        batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
+        if self.fixed_len:
+            batch_len = self.fixed_len
+        elif self.max_len:
+            batch_len = min(batch_len, self.max_len)
+
+        if len(sample_sentence) > batch_len:
+            sample_sentence = sample_sentence[:(batch_len-1)]
+
+        batch = self.rng.randint(
+            self.lowest_byte, self.highest_byte+1, (bsz, batch_len), dtype=np.uint8)
+        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
+                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
+                            dtype=np.uint8)
+        assert bytes_.shape[1] == batch_len, bytes_.shape
+        batch[0] = bytes_
+        batch = self.maybe_pad(batch)
+        batch_tensor = torch.from_numpy(batch).long()
+
+        if self.cuda:
+            batch_tensor = batch_tensor.cuda()
+        yield (batch_tensor, batch_tensor) #(source, target)
+
+
+class UTF8File(object):
+    def __init__(self, path, cuda, rng=None, fixed_len=None,
+                 min_len=4, max_len=np.inf, use_cache=True):
+        self.cuda = cuda
+        self.rng = np.random.RandomState(rng)
+        self.fixed_len = fixed_len
+        self.min_len = min_len
+        self.max_len = fixed_len or max_len
+        if self.max_len is not None and self.fixed_len is not None:
+            raise ValueError
+        if use_cache:
+            self.lines = Cache.load(path, min_len=min_len, max_len=self.max_len)
+        else:
+            self.lines = Cache.byte_file_to_lines(min_len=min_len, max_len=self.max_len)
 
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
@@ -300,12 +395,15 @@ class UTF8CharVarStarFile(UTF8CharStarFile):
 
 
 class UTF8Corpus(object):
-    def __init__(self, path, cuda, file_class=UTF8File, rng=None, fixed_len=None,
+    def __init__(self, path, cuda, file_class=UTF8File, rng=None,
+                 fixed_len=None, min_len=4, max_len=np.inf,
                  use_cache=True, sets=dict(train=True, valid=True, test=True)):
         if use_cache:
             Cache.build(path + 'train.txt')
             Cache.build(path + 'valid.txt')
             Cache.build(path + 'test.txt')
-        self.train = file_class(path + 'train.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['train'] else None
-        self.valid = file_class(path + 'valid.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['valid'] else None
-        self.test = file_class(path + 'test.txt', cuda, rng=rng, fixed_len=fixed_len, use_cache=use_cache) if sets['test'] else None
+        subset_kwargs = dict(rng=rng, fixed_len=fixed_len,
+            min_len=min_len, max_len=max_len, use_cache=use_cache)
+        self.train = file_class(path + 'train.txt', cuda, **subset_kwargs) if sets['train'] else None
+        self.valid = file_class(path + 'valid.txt', cuda, **subset_kwargs) if sets['valid'] else None
+        self.test = file_class(path + 'test.txt', cuda, **subset_kwargs) if sets['test'] else None

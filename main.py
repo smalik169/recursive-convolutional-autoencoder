@@ -62,7 +62,7 @@ parser.add_argument('--seed', type=int, default=1111,
                     help='random seed')
 parser.add_argument('--cuda', action='store_true',
                     help='use CUDA')
-parser.add_argument('--save-state', action='store_true',
+parser.add_argument('--save-state', type=bool, default=True,
                     help='save training state after each epoch')
 parser.add_argument('--log-interval', type=int, default=200, metavar='N',
                     help='report interval')
@@ -168,6 +168,13 @@ if __name__ == '__main__':
             log_weights=args.log_weights, log_grads=args.log_grads)
         logger.save_model_info(dict(model=(args.model, model_kwargs)))
         first_epoch = 1
+
+        if args.initialize_from_model != '':
+            print('Trying to load model weights from', args.initialize_from_model)
+            model.load_state_dict(logger.load_model_state_dict(
+                path=os.path.join(args.initialize_from_model, 'current_model.pt')),
+                strict=False)
+
 
     print(logger.logdir)
 

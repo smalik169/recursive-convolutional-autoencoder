@@ -71,12 +71,6 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
     # Load model params
     model.load_state_dict(logger.load_model_state_dict(current=True))
 
-    if training_state['args'].initialize_from_model != '':
-        print('Trying to load model weights from', args.initialize_from_model)
-        model.load_state_dict(logger.load_model_state_dict(
-            path=os.path.join(args.initialize_from_model, 'current_model.pt')),
-            strict=False)
-
     # Parse some of forced_args
     forced_args = training_state['forced_args']
     if forced_args and forced_args.has_key('lr'):
@@ -88,7 +82,7 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
     # Advance lr scheduler (it doesn't have load/save state_dict methods)
     if scheduler is not None:
         old_lr = optimizer.param_groups[0]['lr']
-        for _ in range(1, first_epoch):
+        for _ in range(1, first_epoch + 1):
             scheduler.step()
         new_lr = optimizer.param_groups[0]['lr']
         logger.lr = new_lr
