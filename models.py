@@ -124,7 +124,7 @@ class ByteCNNEncoder(nn.Module):
                 postfix_layers.append(Residual(
                     lambda: nn.Conv1d(em_in, em_in, **conv_kwargs),
                     lambda: nn.Conv1d(em_in, em_in // 2, **conv_kwargs),
-                    batch_norm=batch_norm, instance_norm=instance_norm, 
+                    batch_norm=batch_norm, instance_norm=instance_norm,
                     residual_connection=False,
                     out_relu=(em_in // 2 > self.compress_channels)))
                 em_in = em_in // 2
@@ -418,6 +418,167 @@ class NonRecurrentByteCNNEncoder(nn.Module):
         x = self.nonrecurrent(x)
         bsz = x.size(0)
         return self.postfix(x.view(bsz, -1))
+
+
+class ConceptRNN(nn.Module):
+    save_best = True
+    def __init__(self, n=8, emsize=256, vocab_size=256,
+            batch_norm=True, instance_norm=False,
+            ignore_index=-1, eos=0,
+            use_linear_layers=True, compress_channels=None,
+            use_output_embeddings=False):  ## XXX Check default emsize
+        super(ConceptRNN, self).__init__()
+        self.n = n
+        self.emsize = emsize
+        self.batch_norm = batch_norm
+        self.instance_norm = instance_norm
+        self.encoder = ByteCNNEncoder(n, emsize, vocab_size, batch_norm=batch_norm,
+                instance_norm=instance_norm,
+                padding_idx=(ignore_index if ignore_index >= 0 else None),
+                use_linear_layers=use_linear_layers,
+                compress_channels=compress_channels)
+
+        self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
+                batch_norm=batch_norm, instance_norm=instance_norm,
+                use_linear_layers=use_linear_layers,
+                compress_channels=compress_channels,
+                output_embeddings_init=None)
+
+        self.rnn = nn.LSTM(
+                input_size=2*emsize,
+                hidden_size=emsize,
+                batch_first=True)
+
+        self.output_projection = None
+        if self.rnn.hidden_size != vocab_size or use_output_embeddings:
+            self.output_projection = nn.Linear(self.rnn.hidden_size, vocab_size)
+
+        self.log_softmax = nn.LogSoftmax()
+        self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        self.eos = eos
+
+    def forward(self, x):
+        #r = self.num_recurrences(x)
+        #x = self.encoder(x, r)
+        #x = self.decoder(x, r)
+        #return self.log_softmax(x)
+        raise "Not implemented" # TODO
+
+    def num_recurrences(self, x):
+        rfloat = np.log2(x.size(-1))
+        r = int(rfloat)
+        assert float(r) == rfloat, x.size(-1)
+        return r
+
+    def _encode_decode(self, src, tgt, r_tgt=None):
+        r_src = self.num_recurrences(src)
+        r_tgt = self.num_recurrences(tgt) if r_tgt is None else r_tgt
+        features = self.encoder(src, r_src)
+        inflated = self.decoder(features, r_tgt).transpose(1, 2)
+        eos = Variable(
+                src.data.new(torch.Size([1, src.size(1)])).fill_(self.eos))
+        #rnn_input = torch.cat([
+        #    self.encoder.embedding(eos),
+        #    inflated[:-1] + self.encoder.embedding(src[:-1])])
+        #rnn_input = torch.cat([
+        #    inflated[:1],
+        #    inflated[1:] + self.encoder.embedding(src[:-1])])
+        embedded_tokens = torch.cat([
+            self.encoder.embedding(eos),
+            self.encoder.embedding(src[:-1])])
+        rnn_input = torch.cat([embedded_tokens, inflated], dim=2)
+        decoded = self.rnn(rnn_input)[0]
+        if self.output_projection is not None:
+            decoded = self.output_projection(decoded)
+        return decoded
+
+    def train_on(self, batch_iterator, optimizer, logger=None):
+        self.train()
+        losses = []
+        errs = []
+        for batch, (src, tgt) in enumerate(batch_iterator):
+            self.zero_grad()
+            src = Variable(src)
+            tgt = Variable(tgt)
+            decoded = self._encode_decode(src, tgt)
+            loss = self.criterion(
+                decoded.contiguous().view(-1, decoded.size(2)),
+                tgt.view(-1))
+            loss.backward()
+            optimizer.step()
+
+            _, predictions = decoded.data.max(dim=2)
+            mask = (tgt.data != self.criterion.ignore_index)
+            err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() / mask.sum()
+            losses.append(loss.data[0])
+            errs.append(err_rate)
+            logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
+                             named_params=self.named_parameters)
+        return losses, errs
+
+    def eval_on(self, batch_iterator, switch_to_evalmode=True):
+        self.eval() if switch_to_evalmode else self.train()
+        errs = 0
+        samples = 0
+        total_loss = 0
+        batch_cnt = 0
+        for (src, tgt) in batch_iterator:
+            src = Variable(src, volatile=True)
+            tgt = Variable(tgt, volatile=True)
+            decoded = self._encode_decode(src, tgt)
+            total_loss += self.criterion(
+                decoded.contiguous().view(-1, decoded.size(2)),
+                tgt.view(-1))
+
+            _, predictions = decoded.data.max(dim=2)
+            mask = (tgt.data != self.criterion.ignore_index)
+            errs += (predictions[mask] != tgt.data[mask]).sum()
+            samples += mask.sum()
+            batch_cnt += 1
+        return {'loss': total_loss.data[0]/batch_cnt,
+                'acc': 100 - 100. * errs / samples,}
+
+    def try_on(self, batch_iterator, switch_to_evalmode=True, r_tgt=None):
+        self.eval() if switch_to_evalmode else self.train()
+        predicted = []
+        for (src, tgt) in batch_iterator:
+            src = Variable(src, volatile=True)
+            tgt = Variable(tgt, volatile=True)
+            decoded = self._encode_decode(src, tgt, r_tgt=r_tgt)
+            _, predictions = decoded.data.max(dim=2)
+
+            # Make into strings and append to decoded
+            for pred in predictions:
+                pred = list(pred.cpu().numpy())
+                pred = pred[:pred.index(self.eos)] if self.eos in pred else pred
+                pred = repr(''.join([chr(c) for c in pred]))
+                predicted.append(pred)
+        return predicted
+
+    @staticmethod
+    def load_model(path):
+        """Load a model"""
+        model_pt = os.path.join(path, 'model.pt')
+        model_info = os.path.join(path, 'model.info')
+
+        with open(model_info, 'r') as f:
+            p = defaultdict(str)
+            p.update(dict(line.strip().split('=', 1) for line in f))
+
+        # Read and pop one by one, then raise if something's left
+        model_class = eval(p['model_class'])
+        del p['model_class']
+        model_kwargs = eval("dict(%s)" % p['model_kwargs'])
+        del p['model_kwargs']
+        if len(p) > 0:
+            raise ValueError('Unknown model params: ' + ', '.join(p.keys()))
+
+        assert p['model_class'] == 'ByteCNN', \
+            'Tried to load %s as ByteCNN' % p['model_class']
+        model = model_class(**model_kwargs)
+        with open(model_pt, 'rb') as f:
+            model.load_state_dict(torch.load(f))
+        return model
 
 
 class NonRecurrentByteCNNDecoder(nn.Module):

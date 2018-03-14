@@ -49,14 +49,6 @@ if __name__ == '__main__':
     parser.add_argument('--args', action='store_true', default=False,
                         help='Print all args for an experiment')
     args = parser.parse_args()
-    
-    parser = argparse.ArgumentParser(description='Byte-level CNN model manager')
-    parser.add_argument('dirs', type=str, nargs='+')
-    parser.add_argument('--table', action='store_true', default=False,
-                        help='Print summary table')
-    parser.add_argument('--args', action='store_true', default=False,
-                        help='Print all args for an experiment')
-    args = parser.parse_args()
 
     # dirs = [d for d in os.listdir('.') if d.startswith('2018-')]
     exp_details = [(name, model_details(name)) for name in args.dirs]
