@@ -5,6 +5,7 @@ import argparse
 import codecs
 import os
 import pprint
+import sys
 import time
 from collections import defaultdict
 from itertools import chain
@@ -175,7 +176,6 @@ if __name__ == '__main__':
                 path=os.path.join(args.initialize_from_model, 'current_model.pt')),
                 strict=False)
 
-
     print(logger.logdir)
 
     ###############################################################################
@@ -183,7 +183,8 @@ if __name__ == '__main__':
     ###############################################################################
     # TODO Unindent if __name__ == after merging
     if explorer_mode:
-        explorer.analyze(args, dataset, model, optimizer)
+        explorer = explorer.Explorer(args, dataset, model, optimizer, logger)
+        explorer.analyze()
         sys.exit(0)
 
     ###############################################################################
@@ -203,8 +204,8 @@ if __name__ == '__main__':
             val_loss = model.eval_on(
                 dataset.valid.iter_epoch(args.batch_size, evaluation=True),
                 switch_to_evalmode=False)
-            print(model.try_on(dataset.valid.sample_batch(1 if model.instance_norm else args.batch_size),
-                               switch_to_evalmode=False)[0])
+            print(repr(model.try_on(dataset.valid.sample_batch(1 if model.instance_norm else args.batch_size),
+                               switch_to_evalmode=False)[0]))
             logger.valid_log(val_loss)
 
             # Save the model if the validation loss is the best we've seen so far.

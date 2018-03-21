@@ -29,7 +29,8 @@ def parse_resume_training(args):
         print('\nWarning: Some args (e.g., --optimizer-kwargs) will be ignored. '
               'Some loaded components, as the optimizer, are already constructed.')
         for k,v in forced_args.items():
-            assert hasattr(state['args'], k)
+            if not hasattr(state['args'], k):
+                print('\nWARNING: Setting arg which was previously unset: %s\n' % k)
             setattr(state['args'], k, v)
     state['forced_args'] = forced_args
 
@@ -54,11 +55,6 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
     logger = training_state['logger']
     # state = logger.set_training_state(training_state, optimizer, model)
 
-    # Load optimizer parameters
-    optimizer.load_state_dict(training_state['optimizer'])
-    # https://discuss.pytorch.org/t/saving-and-loading-sgd-optimizer/2536
-    optimizer.state = defaultdict(dict, optimizer.state)
-
     # Load model state
     model_state = training_state.get('model_state', None)
     forced_model_state = training_state.get('forced_model_state', None)
@@ -68,8 +64,12 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
         print('Forcing model state: %s' % forced_model_state)
         model.load_state(forced_model_state)
 
-    # Load model params
-    model.load_state_dict(logger.load_model_state_dict(current=True))
+    model.load_state_dict(logger.load_model_state_dict(current=True), strict=True)
+
+    # Load optimizer parameters
+    optimizer.load_state_dict(training_state['optimizer'])
+    # https://discuss.pytorch.org/t/saving-and-loading-sgd-optimizer/2536
+    optimizer.state = defaultdict(dict, optimizer.state)
 
     # Parse some of forced_args
     forced_args = training_state['forced_args']
