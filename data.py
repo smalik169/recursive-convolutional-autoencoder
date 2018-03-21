@@ -127,7 +127,7 @@ class RandomFile(object):
     def iter_epoch(self, bsz, evaluation=False):
         is_power_of_2 = lambda x: 2**int(np.log2(x)) == x
         assert is_power_of_2(self.min_len)
-        assert self.max_len is None or is_power_of_2(self.max_len)
+        assert self.max_len is np.inf or is_power_of_2(self.max_len)
         assert self.fixed_len is None or is_power_of_2(self.fixed_len)
         if self.fixed_len is not None:
             lengths = [self.fixed_len]

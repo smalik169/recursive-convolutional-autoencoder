@@ -27,6 +27,8 @@ parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
 parser.add_argument('--resume-training-force-model-state', type=str, default='',
                     help='enforce a model state (as a parsable dict)')
+parser.add_argument('--resume-training-unroll', action='store_true',
+                    help='unroll the model upon loading and clone recurrent layers')
 parser.add_argument('--explore', action='store_true', default=False,
                     help='run in explorer mode')
 parser.add_argument('--initialize-from-model', type=str, default='',
@@ -131,12 +133,7 @@ if __name__ == '__main__':
     if args.cuda:
         model.cuda()
 
-    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-    num_params = sum([np.prod(p.size()) for p in model_parameters])
-    print("Model summary:\n%s" % (model,))
-    print("Model params:\n%s" % ("\n".join(
-        ["%s: %s" % (p[0], p[1].size()) for p in model.named_parameters()])))
-    print("Number of params: %.2fM" % (num_params / 10.0**6))
+    logger_module.print_model_summary(model)
 
     ###############################################################################
     # Setup training
