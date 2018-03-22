@@ -56,6 +56,11 @@ def parse_resume_training(args):
         state['forced_model_state'] = eval('dict(%s)' % args.resume_training_force_model_state)
 
     args = state['args']
+
+    if 'model_kwargs' in args.__dict__:
+        args.__dict__['model_kwargs'] = BackwardCompat.model_kwargs_str(
+            args.__dict__['model_kwargs'])
+
     print(args)
     print('\nWarning: Ignoring other input arguments!\n')
 
@@ -76,7 +81,9 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
         print('Forcing model state: %s' % forced_model_state)
         model.load_state(forced_model_state)
 
-    model.load_state_dict(logger.load_model_state_dict(current=True), strict=True)
+    state_dict = logger.load_model_state_dict(current=True)
+    state_dict = BackwardCompat.model_state_dict(state_dict)
+    model.load_state_dict(state_dict, strict=True)
 
     # Load optimizer parameters
     optimizer.load_state_dict(training_state['optimizer'])
@@ -128,6 +135,50 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
 
     return dict(model=model, optimizer=optimizer, scheduler=scheduler,
                 logger=logger, first_epoch=first_epoch)
+
+
+class BackwardCompat(object):
+
+    @staticmethod
+    def model_kwargs_str(kw_str):
+        model_kwargs = eval('dict(%s)' % kw_str)
+        # Old model kwargs: batch_norm=True, instance_norm=False,
+        # New model kwargs: encoder_norm='batch' | 'instance' | None
+        #                   decoder_norm='batch' | 'instance' | None
+        was_bn = model_kwargs.get('batch_norm', False)
+        was_in = model_kwargs.get('instance_norm', False)
+        assert not (was_bn and was_in)
+
+        if was_bn:
+            extra_kwargs = dict(encode_norm='batch', decoder_norm='batch')
+        elif was_in:
+            extra_kwargs = dict(encode_norm='instance', decoder_norm='instance')
+        else:
+            extra_kwargs = {}
+
+        if model_kwargs.has_key('batch_norm'):
+            del model_kwargs['batch_norm']
+        if model_kwargs.has_key('instance_norm'):
+            del model_kwargs['instance_norm']
+        model_kwargs.update(extra_kwargs)
+
+        kw_str = ','.join('%s=%s' % kv for kv in model_kwargs.items())
+        return kw_str
+
+    @staticmethod
+    def model_state_dict(params):
+        # instance and batch norm layers in each Residual have been renamed
+        # from bn1, bn2 and in1, in2 to norm1, norm2
+        for name,p in params.items():
+            fields = name.split('.')
+            if not any([f in ('bn1', 'bn2', 'in1', 'in2') for f in fields]):
+                continue
+            fields = ['norm1' if f in ('bn1', 'in1') else f for f in fields]
+            fields = ['norm2' if f in ('bn2', 'in2') else f for f in fields]
+            new_name = '.'.join(fields)
+            params[new_name] = p
+            del params[name]
+        return params
 
 
 class Writer(object):
