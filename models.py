@@ -52,8 +52,9 @@ class Residual(nn.Module):
         self.out_relu = out_relu
         self.normalization = normalization
         self.residual_connection = residual_connection
-        self.norm1 = norm_protos[normalization](self.num_channels(self.layer1))
-        self.norm2 = norm_protos[normalization](self.num_channels(self.layer2))
+        # TODO Keep old 'bn' name for backward compat when loading params
+        self.bn1 = norm_protos[normalization](self.num_channels(self.layer1))
+        self.bn2 = norm_protos[normalization](self.num_channels(self.layer2))
 
     def num_channels(self, layer):
         if type(layer) is ExpandConv1d:
@@ -68,10 +69,10 @@ class Residual(nn.Module):
     def forward(self, x):
         residual = x
         out = self.layer1(x)
-        out = self.norm1(out)
+        out = self.bn1(out)
         out = self.relu(out)
         out = self.layer2(out)
-        out = self.norm2(out)
+        out = self.bn2(out)
 
         if self.residual_connection:
             out += residual

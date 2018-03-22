@@ -82,7 +82,6 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
         model.load_state(forced_model_state)
 
     state_dict = logger.load_model_state_dict(current=True)
-    state_dict = BackwardCompat.model_state_dict(state_dict)
     model.load_state_dict(state_dict, strict=True)
 
     # Load optimizer parameters
@@ -164,21 +163,6 @@ class BackwardCompat(object):
 
         kw_str = ','.join('%s=%s' % kv for kv in model_kwargs.items())
         return kw_str
-
-    @staticmethod
-    def model_state_dict(params):
-        # instance and batch norm layers in each Residual have been renamed
-        # from bn1, bn2 and in1, in2 to norm1, norm2
-        for name,p in params.items():
-            fields = name.split('.')
-            if not any([f in ('bn1', 'bn2', 'in1', 'in2') for f in fields]):
-                continue
-            fields = ['norm1' if f in ('bn1', 'in1') else f for f in fields]
-            fields = ['norm2' if f in ('bn2', 'in2') else f for f in fields]
-            new_name = '.'.join(fields)
-            params[new_name] = p
-            del params[name]
-        return params
 
 
 class Writer(object):
