@@ -1,6 +1,7 @@
 from __future__ import print_function
 
 import codecs
+import copy
 import pprint
 from collections import defaultdict
 
@@ -153,9 +154,10 @@ class ByteCNNEncoder(nn.Module):
         self.instance_norm = instance_norm
         self.batch_norm_eval_updates = batch_norm_eval_updates
 
-    def forward(self, x, r):
-        assert x.size(1) >= 4
-        x = self.embedding(x).transpose(1, 2)
+    def forward(self, x, r, embed=True):
+        if embed == True:
+            assert x.size(1) >= 4
+            x = self.embedding(x).transpose(1, 2)
         x = self.prefix(x)
 
         for _ in xrange(r-2):
@@ -267,7 +269,7 @@ class ByteCNN(nn.Module):
             batch_norm=True, instance_norm=False,
             ignore_index=-1, eos=0,
             use_linear_layers=True, compress_channels=None,
-            use_output_embeddings=False, dropout=0.0):  ## XXX Check default emsize
+            use_output_embeddings=False, dropout=0.0, unroll_r=None):
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -289,18 +291,45 @@ class ByteCNN(nn.Module):
         self.log_softmax = nn.LogSoftmax()
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
         self.eos = eos
+        self.unroll_r = None
+        if unroll_r:
+            self.unroll(unroll_r)
 
     def forward(self, x):
-        r = self.num_recurrences(x)
         x = self.encoder(x, r)
         x = self.decoder(x, r)
         return self.log_softmax(x)
 
     def num_recurrences(self, x):
+        if self.unroll_r:
+            return 1 + 2  # 2 will be subtracted from r during forward()
         rfloat = np.log2(x.size(-1))
         r = int(rfloat)
         assert float(r) == rfloat, x.size(-1)
         return r
+
+    def unroll(self, r, clone_weights=False):
+        if self.unroll_r:
+            raise ValueError('Model already unrolled.')
+        self.unroll_r = r
+        self.encoder.recurrent = nn.Sequential(
+            *[self.encoder.recurrent] + [copy.deepcopy(self.encoder.recurrent) \
+              for _ in range(r-1)])
+        self.decoder.recurrent = nn.Sequential(
+            *[self.decoder.recurrent] + [copy.deepcopy(self.decoder.recurrent) \
+              for _ in range(r-1)])
+
+        if not clone_weights:
+            [l.reset_parameters() for l in self.encoder.recurrent \
+             if hasattr(l, 'reset_parameters')]
+            [l.reset_parameters() for l in self.decoder.recurrent \
+             if hasattr(l, 'reset_parameters')]
+
+    def get_state(self):
+        return dict(unroll_r=self.unroll_r)
+
+    def load_state(self, state):
+        self.unroll_r = state.get('unroll_r', None)
 
     def _encode_decode(self, src, tgt, r_tgt=None):
         r_src = self.num_recurrences(src)
@@ -364,27 +393,31 @@ class ByteCNN(nn.Module):
         return {'loss': total_loss.data[0]/batch_cnt,
                 'acc': 100 - 100. * errs / samples,}
 
-    def try_on(self, batch_iterator, switch_to_evalmode=True, r_tgt=None):
+    def try_on(self, batch_iterator, switch_to_evalmode=True, r_tgt=None,
+               return_outputs=False):
         #self.eval() if switch_to_evalmode else self.train()
         if switch_to_evalmode:
             self.eval()
         else:
             eval_all_but_batchnorm(self)
 
+        outputs = []
         predicted = []
         for (src, tgt) in batch_iterator:
             src = Variable(src, volatile=True)
             tgt = Variable(tgt, volatile=True)
             decoded = self._encode_decode(src, tgt, r_tgt=r_tgt)
             _, predictions = decoded.data.max(dim=1)
+            if return_outputs:
+                outputs.append(decoded.data.cpu().numpy())
 
             # Make into strings and append to decoded
             for pred in predictions:
                 pred = list(pred.cpu().numpy())
                 pred = pred[:pred.index(self.eos)] if self.eos in pred else pred
-                pred = repr(''.join([chr(c) for c in pred]))
+                pred = ''.join([chr(c) for c in pred])
                 predicted.append(pred)
-        return predicted
+        return (predicted, outputs) if return_outputs else predicted
 
     @staticmethod
     def load_model(path):
@@ -739,7 +772,7 @@ class NonRecurrentByteCNN(nn.Module):
             for pred in predictions:
                 pred = list(pred.cpu().numpy())
                 pred = pred[:pred.index(self.eos)] if self.eos in pred else pred
-                pred = repr(''.join([chr(c) for c in pred]))
+                pred = ''.join([chr(c) for c in pred])
                 predicted.append(pred)
         return predicted
 
@@ -771,9 +804,11 @@ class NonRecurrentByteCNN(nn.Module):
 
 class VAEByteCNN(nn.Module):
     save_best = True
-    def __init__(self, n=8, emsize=256, batch_norm=True,  ## XXX Check default emsize
-                 instance_norm=False,
+    def __init__(self, n=8, emsize=256, vocab_size=256,
+                 batch_norm=True, instance_norm=False,
                  ignore_index=-1, eos=0,
+                 use_linear_layers=True, compress_channels=None,
+                 use_output_embeddings=False, unroll_r=None,
                  kl_weight_init=1e-5, kl_weight_end=1.0,
                  kl_increment_start=None, kl_increment=None):
         super(VAEByteCNN, self).__init__()
@@ -781,11 +816,16 @@ class VAEByteCNN(nn.Module):
         self.emsize = emsize
         self.batch_norm = batch_norm
         self.instance_norm = instance_norm
-        self.encoder = ByteCNNEncoder(n, emsize, batch_norm=batch_norm,
+        self.encoder = ByteCNNEncoder(n, emsize, vocab_size, batch_norm=batch_norm,
                 instance_norm=instance_norm,
-                padding_idx=(ignore_index if ignore_index >= 0 else None))
-        self.decoder = ByteCNNDecoder(n, emsize, batch_norm=batch_norm,
-                instance_norm=instance_norm)
+                padding_idx=(ignore_index if ignore_index >= 0 else None),
+                use_linear_layers=use_linear_layers,
+                compress_channels=compress_channels)
+        self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
+                batch_norm=batch_norm, instance_norm=instance_norm,
+                use_linear_layers=use_linear_layers,
+                compress_channels=compress_channels,
+                output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None))
         self.log_softmax = nn.LogSoftmax()
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
         self.eos = eos
@@ -795,15 +835,19 @@ class VAEByteCNN(nn.Module):
         self.kl_weight_end = kl_weight_end
         self.kl_increment_start = kl_increment_start
         self.kl_increment = kl_increment
+        self.unroll_r = None
+        if unroll_r:
+            self.unroll(unroll_r)
 
     def get_state(self):
         return dict(kl_weight=self.kl_weight,
-                    kl_increment_start=self.kl_increment_start)
+                    kl_increment_start=self.kl_increment_start,
+                    unroll_r=self.unroll_r)
 
     def load_state(self, state):
         self.kl_weight = state['kl_weight']
-        if state.has_key('kl_increment_start'):
-            self.kl_increment_start = state['kl_increment_start']
+        self.kl_increment_start = state.get('kl_increment_start', None)
+        self.unroll_r = state.get('unroll_r', None)
 
     def get_features_and_KL(self, mu, log_sigma):
         bs = mu.size(0)
@@ -822,11 +866,29 @@ class VAEByteCNN(nn.Module):
         return self.log_softmax(x)
 
     def num_recurrences(self, x):
+        if self.unroll_r:
+            return 1 + 2  # 2 will be subtracted from r during forward()
         rfloat = np.log2(x.size(-1))
-
         r = int(rfloat)
         assert float(r) == rfloat
         return r
+
+    def unroll(self, r, clone_weights=False):
+        if self.unroll_r:
+            raise ValueError('Model already unrolled.')
+        self.unroll_r = r
+        self.encoder.recurrent = nn.Sequential(
+            *[self.encoder.recurrent] + [copy.deepcopy(self.encoder.recurrent) \
+              for _ in range(r-1)])
+        self.decoder.recurrent = nn.Sequential(
+            *[self.decoder.recurrent] + [copy.deepcopy(self.decoder.recurrent) \
+              for _ in range(r-1)])
+
+        if not clone_weights:
+            [l.reset_parameters() for l in self.encoder.recurrent \
+             if hasattr(l, 'reset_parameters')]
+            [l.reset_parameters() for l in self.decoder.recurrent \
+             if hasattr(l, 'reset_parameters')]
 
     def _encode_decode(self, src, tgt, r_tgt=None, first_sample_random=False):
         r_src = self.num_recurrences(src)
@@ -899,22 +961,25 @@ class VAEByteCNN(nn.Module):
                 'kl': kl.data[0], 'kl_weight': self.kl_weight}
 
     def try_on(self, batch_iterator, switch_to_evalmode=True, r_tgt=None,
-               first_sample_random=False):
+               first_sample_random=False, return_outputs=False):
         self.eval() if switch_to_evalmode else self.train()
+        outputs = []
         predicted = []
         for batch, (src, tgt) in enumerate(batch_iterator):
             src = Variable(src, volatile=True)
             tgt = Variable(tgt, volatile=True)
             decoded, kl = self._encode_decode(src, tgt, r_tgt, first_sample_random=first_sample_random)
             _, predictions = decoded.data.max(dim=1)
+            if return_outputs:
+                outputs.append(decoded.data.cpu().numpy())
 
             # Make into strings and append to decoded
             for pred in predictions:
                 pred = list(pred.cpu().numpy())
                 pred = pred[:pred.index(self.eos)] if self.eos in pred else pred
-                pred = repr(''.join([chr(c) for c in pred]))
+                pred = ''.join([chr(c) for c in pred])
                 predicted.append(pred)
-        return predicted
+        return (predicted, outputs) if return_outputs else predicted
 
     @staticmethod
     def load_model(path):

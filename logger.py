@@ -2,6 +2,7 @@
 # and https://github.com/yunjey/pytorch-tutorial/blob/master/tutorials/04-utils/tensorboard/logger.py
 import datetime
 import glob
+import itertools
 import os
 import shutil
 import sys
@@ -9,12 +10,21 @@ import time
 from collections import defaultdict
 
 import torch
+import torch.nn as nn
 import numpy as np
 import tensorflow as tf
 
 
 def to_np(x):
     return x.data.cpu().numpy()
+
+def print_model_summary(model):
+    model_parameters = filter(lambda p: p.requires_grad, model.parameters())
+    num_params = sum([np.prod(p.size()) for p in model_parameters])
+    print("Model summary:\n%s" % (model,))
+    print("Model params:\n%s" % ("\n".join(
+        ["%s: %s" % (p[0], p[1].size()) for p in model.named_parameters()])))
+    print("Number of params: %.2fM" % (num_params / 10.0**6))
 
 def parse_resume_training(args):
     resume_path = args.resume_training
@@ -29,9 +39,12 @@ def parse_resume_training(args):
         print('\nWarning: Some args (e.g., --optimizer-kwargs) will be ignored. '
               'Some loaded components, as the optimizer, are already constructed.')
         for k,v in forced_args.items():
-            assert hasattr(state['args'], k)
+            if not hasattr(state['args'], k):
+                print('\nWARNING: Setting arg which was previously unset: %s\n' % k)
             setattr(state['args'], k, v)
     state['forced_args'] = forced_args
+    if args.resume_training_unroll:
+        state['unroll_now'] = True
 
     # If some defaults are absent in state['args']
     for k,v in args.__dict__.items():
@@ -54,11 +67,6 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
     logger = training_state['logger']
     # state = logger.set_training_state(training_state, optimizer, model)
 
-    # Load optimizer parameters
-    optimizer.load_state_dict(training_state['optimizer'])
-    # https://discuss.pytorch.org/t/saving-and-loading-sgd-optimizer/2536
-    optimizer.state = defaultdict(dict, optimizer.state)
-
     # Load model state
     model_state = training_state.get('model_state', None)
     forced_model_state = training_state.get('forced_model_state', None)
@@ -68,8 +76,32 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
         print('Forcing model state: %s' % forced_model_state)
         model.load_state(forced_model_state)
 
-    # Load model params
-    model.load_state_dict(logger.load_model_state_dict(current=True))
+    model.load_state_dict(logger.load_model_state_dict(current=True), strict=True)
+
+    # Load optimizer parameters
+    optimizer.load_state_dict(training_state['optimizer'])
+    # https://discuss.pytorch.org/t/saving-and-loading-sgd-optimizer/2536
+    optimizer.state = defaultdict(dict, optimizer.state)
+
+    if training_state.get('unroll_now', False):
+        # Determine r
+        data_kwargs = eval('dict(%s)' % training_state['args'].data_kwargs)
+        r = int(np.log2(data_kwargs['fixed_len'])) - 2
+        print('Unrolling the model')
+        model.unroll(r, clone_weights=True)
+        print_model_summary(model)
+
+        # Add unrolled parameters to optimizer.
+        # encoder.recurrent is of form nn.Sequential(old_sequential, new_sequential1, ...)
+        # Only new_sequential parameters need to be added
+        for name in ('encoder', 'decoder'):
+            module = getattr(model, name).recurrent
+            assert type(module) is nn.Sequential
+            assert type(module[0]) is nn.Sequential
+            sub_sequential_iter = iter(module)
+            sub_sequential_iter.next()  # Skip old_sequential
+            params = itertools.chain(*[l.parameters() for l in sub_sequential_iter])
+            optimizer.add_param_group({'params': params})
 
     # Parse some of forced_args
     forced_args = training_state['forced_args']

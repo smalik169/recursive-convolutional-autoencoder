@@ -5,6 +5,7 @@ import argparse
 import codecs
 import os
 import pprint
+import sys
 import time
 from collections import defaultdict
 from itertools import chain
@@ -26,6 +27,8 @@ parser.add_argument('--resume-training', type=str, default='',
                     help='path to a training directory (loads the model and the optimizer)')
 parser.add_argument('--resume-training-force-model-state', type=str, default='',
                     help='enforce a model state (as a parsable dict)')
+parser.add_argument('--resume-training-unroll', action='store_true',
+                    help='unroll the model upon loading and clone recurrent layers')
 parser.add_argument('--explore', action='store_true', default=False,
                     help='run in explorer mode')
 parser.add_argument('--initialize-from-model', type=str, default='',
@@ -80,7 +83,6 @@ parser.add_argument('--log-grads', action='store_true',
 args = parser.parse_args()
 
 
-
 ###############################################################################
 # Resume old training?
 ###############################################################################
@@ -132,12 +134,7 @@ model = model_class(**model_kwargs)
 if args.cuda:
     model.cuda()
 
-model_parameters = filter(lambda p: p.requires_grad, model.parameters())
-num_params = sum([np.prod(p.size()) for p in model_parameters])
-print("Model summary:\n%s" % (model,))
-print("Model params:\n%s" % ("\n".join(
-    ["%s: %s" % (p[0], p[1].size()) for p in model.named_parameters()])))
-print("Number of params: %.2fM" % (num_params / 10.0**6))
+logger_module.print_model_summary(model)
 
 ###############################################################################
 # Setup training
@@ -180,15 +177,14 @@ else:
             path=os.path.join(args.initialize_from_model, 'current_model.pt')),
             strict=False)
 
-
 print(logger.logdir)
 
 ###############################################################################
 # Explore ?
 ###############################################################################
-# TODO Unindent if __name__ == after merging
 if explorer_mode:
-    explorer.analyze(args, dataset, model, optimizer)
+    explorer = explorer.Explorer(args, dataset, model, optimizer, logger)
+    explorer.analyze()
     sys.exit(0)
 
 ###############################################################################
@@ -210,8 +206,8 @@ try:
         val_loss = model.eval_on(
             dataset.valid.iter_epoch(args.batch_size, evaluation=True),
             switch_to_evalmode=False)
-        print(model.try_on(dataset.valid.sample_batch(1 if model.instance_norm else args.batch_size),
-                           switch_to_evalmode=False)[0])
+        print(repr(model.try_on(dataset.valid.sample_batch(1 if model.instance_norm else args.batch_size),
+                           switch_to_evalmode=False)[0]))
         logger.valid_log(val_loss)
 
         # Save the model if the validation loss is the best we've seen so far.
@@ -226,7 +222,7 @@ try:
         #         logger.save_model_state_dict(model.state_dict())
         #         best_val_loss = val_loss['nll_per_w']
 
-        if args.lr_step_lambda is None:
+        if args.lr_step_lambda is None and scheduler is not None:
             scheduler.step()
             logger.lr = optimizer.param_groups[0]['lr']
 
