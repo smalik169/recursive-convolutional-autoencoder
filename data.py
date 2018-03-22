@@ -91,7 +91,7 @@ class RegularizedFile(object):
 
 
 class RandomFile(object):
-    def __init__(self, path, cuda, rng=None, fixed_len=None,
+    def __init__(self, path, cuda, rng=None, fixed_len=None, p=None,
                  use_cache=False, max_len=64, lowest_byte=32, highest_byte=122):
         if 'valid' in path or 'test' in path:
             self.num_samples = 10000
@@ -164,7 +164,7 @@ class RandomFile(object):
 
 
 class UTF8File(object):
-    def __init__(self, path, cuda, rng=None, fixed_len=None,
+    def __init__(self, path, cuda, rng=None, fixed_len=None, p=None,
                  min_len=4, max_len=np.inf, use_cache=True):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
@@ -176,7 +176,7 @@ class UTF8File(object):
         if use_cache:
             self.lines = Cache.load(path, min_len=min_len, max_len=self.max_len)
         else:
-            self.lines = Cache.byte_file_to_lines(min_len=min_len, max_len=self.max_len)
+            self.lines = Cache.byte_file_to_lines(path, min_len=min_len, max_len=self.max_len)
 
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
@@ -237,7 +237,8 @@ class UTF8File(object):
 
 
 class UTF8WordStarFile(object):
-    def __init__(self, path, cuda, rng=None, p=0.2, max_w_len=1000, fixed_len=None, use_cache=True):
+    def __init__(self, path, cuda, rng=None, p=0.2, max_w_len=1000,
+                 fixed_len=None, min_len=4, max_len=np.inf, use_cache=True):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
         self.p = p
@@ -320,12 +321,13 @@ class UTF8WordStarFile(object):
         tgt[0] = torch.from_numpy(bytes_).long()
         src = self._compy_and_mask_target(tgt)
 
-        print("Source:", ''.join(map(chr, src[0].numpy())))
+        print("Source:",
+              ''.join(map(chr, src[0].numpy())).replace(chr(WILDCARD), '*'))
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 
 class UTF8CharStarFile(UTF8File):
-    def __init__(self, path, cuda, p=0.5, **kwargs):
+    def __init__(self, path, cuda, p=0.2, **kwargs):
         super(UTF8CharStarFile, self).__init__(path, cuda, **kwargs)
         self.p = p
 
@@ -380,8 +382,9 @@ class UTF8CharStarFile(UTF8File):
         src = tgt.clone()
         mask = (torch.rand(src.size()) < self.p)
         mask = mask & (src != EMPTY)
-        src[mask] = ord('*')
-        # print("Source:", ''.join(map(chr, src[0].numpy())))
+        src[mask] = WILDCARD
+        print("Source:",
+              ''.join(map(chr, src[0].numpy())).replace(chr(WILDCARD), '*'))
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 
