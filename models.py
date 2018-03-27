@@ -22,6 +22,14 @@ def eval_all_but_batchnorm(module): # XXX temporary solution
 
     return module
 
+class NoopLayer(nn.Module):
+    def forward(self, x):
+        return x
+
+norm_protos = {'batch': lambda c: nn.BatchNorm1d(c, momentum=0.1),
+               'instance': lambda c: nn.InstanceNorm1d(c),
+                None: lambda c: NoopLayer()}
+
 
 class ExpandConv1d(nn.Module):
     def __init__(self, *args, **kwargs):
@@ -38,25 +46,19 @@ class ExpandConv1d(nn.Module):
 
 class Residual(nn.Module):
     def __init__(self, layer_proto, layer2_proto=None, out_relu=True,
-                 batch_norm=True, instance_norm=False,
-                 residual_connection=True, dropout=0.0):
+                 normalization='batch', residual_connection=True, dropout=0.0):
         super(Residual, self).__init__()
         self.layer1 = layer_proto()
         self.relu = nn.ReLU()
         self.layer2 = layer2_proto() if layer2_proto else layer_proto()
         self.out_relu = out_relu
-        self.batch_norm = batch_norm # ignored if instance_norm is True
-        self.instance_norm = instance_norm # if instance_norm is True batch_norm is ignored
+        self.normalization = normalization
         self.residual_connection = residual_connection
         self.dropout = nn.Dropout(p=dropout)
 
-        if batch_norm:
-            self.bn1 = nn.BatchNorm1d(self.num_channels(self.layer1), momentum=0.1)
-            self.bn2 = nn.BatchNorm1d(self.num_channels(self.layer2), momentum=0.1)
-
-        if instance_norm:
-            self.in1 = nn.InstanceNorm1d(self.num_channels(self.layer1))
-            self.in2 = nn.InstanceNorm1d(self.num_channels(self.layer2))
+        # TODO Keep old 'bn' name for backward compat when loading params
+        self.bn1 = norm_protos[normalization](self.num_channels(self.layer1))
+        self.bn2 = norm_protos[normalization](self.num_channels(self.layer2))
 
     def num_channels(self, layer):
         if type(layer) is ExpandConv1d:
@@ -75,9 +77,7 @@ class Residual(nn.Module):
 
         if norm1 is not None:
             out = norm1(out)
-        elif self.instance_norm:
-            out = self.in1(out)
-        elif self.batch_norm:
+        else:
             out = self.bn1(out)
 
         out = self.relu(out)
@@ -85,9 +85,7 @@ class Residual(nn.Module):
 
         if norm2 is not None:
             out = norm2(out)
-        elif self.instance_norm:
-            out = self.in2(out)
-        elif self.batch_norm:
+        else:
             out = self.bn2(out)
 
         if self.residual_connection:
@@ -98,20 +96,20 @@ class Residual(nn.Module):
 
 
 class ByteCNNEncoder(nn.Module):
-    def __init__(self, n, emsize, vocab_size, batch_norm, instance_norm,
-                 batch_norm_eval_updates=False, padding_idx=None,
-                 use_linear_layers=True, compress_channels=None,
+    def __init__(self, n, emsize, vocab_size, normalization, padding_idx=None,
+                 use_linear_layers=True, compress_channels=None, dropout=0.0,
                  dropout=0.0, use_external_batch_norm=False, max_r=None):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
         self.emsize = emsize
         self.vocab_size = vocab_size
         self.max_r = max_r
+        self.normalization = normalization
         assert n % 2 == 0, 'n should be a multiple of 2'
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        def residual_list(proto, k, batch_norm, instance_norm,
+        def residual_list(proto, k, normalization,
                           last_relu=True, dropout=0.0):
             res_list = [Residual(
                     proto,
@@ -124,13 +122,13 @@ class ByteCNNEncoder(nn.Module):
 
         self.embedding = nn.Embedding(vocab_size, emsize, padding_idx=padding_idx)
         self.prefix = nn.Sequential(
-                *(residual_list(conv_proto, n//2, batch_norm, instance_norm,
-                                dropout=dropout)))
+                *(residual_list(
+                    conv_proto, n//2, normalization, dropout=dropout)))
 
         self.recurrent = nn.Sequential(
                 *(residual_list(conv_proto, n//2,
-                                batch_norm and not use_external_batch_norm,
-                                instance_norm and not use_external_batch_norm) + \
+                    normalization=None if use_external_batch_norm else normalization,
+                    dropout=dropout) + \
                 [nn.MaxPool1d(kernel_size=2)]))
         if use_external_batch_norm:
             assert max_r is not None, \
@@ -153,23 +151,20 @@ class ByteCNNEncoder(nn.Module):
                 postfix_layers.append(Residual(
                     lambda: nn.Conv1d(em_in, em_in, **conv_kwargs),
                     lambda: nn.Conv1d(em_in, em_in // 2, **conv_kwargs),
-                    batch_norm=batch_norm, instance_norm=instance_norm,
+                    normalization=normalization,
                     residual_connection=False,
                     out_relu=(em_in // 2 > self.compress_channels)))
                 em_in = em_in // 2
             self.postfix = nn.Sequential(*(postfix_layers))
         elif self.use_linear_layers:
             postfix_layers = residual_list(
-                linear_proto, n//2-1, batch_norm=(batch_norm and not instance_norm),
-                instance_norm=False, last_relu=False, dropout=dropout)
+                linear_proto, n//2-1, normalization,
+                last_relu=False, dropout=dropout)
             self.postfix = nn.Sequential(*postfix_layers)
         else:
             self.postfix = None
 
-        self.batch_norm = batch_norm
-        self.instance_norm = instance_norm
         self.use_external_batch_norm = use_external_batch_norm
-        self.batch_norm_eval_updates = batch_norm_eval_updates
 
     def forward(self, x, r, embed=True):
         if embed == True:
@@ -203,25 +198,22 @@ class ByteCNNEncoder(nn.Module):
 
 
 class ByteCNNDecoder(nn.Module):
-    def __init__(self, n, emsize, vocab_size, batch_norm, instance_norm,
-                 use_linear_layers=True,
-                 compress_channels=None, output_embeddings_init=None):
+    def __init__(self, n, emsize, vocab_size, normalization,
+                 use_linear_layers=True, compress_channels=None,
+                 output_embeddings_init=None):
         super(ByteCNNDecoder, self).__init__()
         self.n = n
         self.emsize = emsize
         self.vocab_size = vocab_size
+        self.normalization = normalization
         assert n % 2 == 0, 'n should be a multiple of 2'
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         expand_proto = lambda: ExpandConv1d(emsize, emsize*2, **conv_kwargs)
         linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        if instance_norm:
-            norm_proto = lambda c: nn.InstanceNorm1d(c)
-        elif batch_norm:
-            norm_proto = lambda c: nn.BatchNorm1d(c, momentum=0.1)
-        residual_list = lambda proto, k, batch_norm, instance_norm, last_relu=True: [
+        residual_list = lambda proto, k, normalization, last_relu=True: [
                 Residual(proto, out_relu=(last_relu or i < k-1),
-                         batch_norm=batch_norm, instance_norm=instance_norm)
+                         normalization=normalization)
                 for i in xrange(k)]
 
         # Set a prefix layer
@@ -235,33 +227,26 @@ class ByteCNNDecoder(nn.Module):
                 prefix_layers.append(Residual(
                     lambda: nn.Conv1d(em_in, em_in, **conv_kwargs),
                     lambda: nn.Conv1d(em_in, em_in * 2, **conv_kwargs),
-                    batch_norm=batch_norm, instance_norm=instance_norm,
+                    normalization=normalization,
                     residual_connection=False))
                 em_in = em_in * 2
             self.prefix = nn.Sequential(*(prefix_layers))
 
         elif self.use_linear_layers:
             self.prefix = nn.Sequential(
-                    *(residual_list(
-                        linear_proto, n//2,
-                        batch_norm=(batch_norm and not instance_norm),
-                        instance_norm=False)))
+                *(residual_list(linear_proto, n//2, normalization=normalization)))
         else:
             self.prefix = None
 
         # Set a recurrent layer
-        if instance_norm or batch_norm:
-            self.recurrent = nn.Sequential(
-                *([expand_proto(), norm_proto(emsize), nn.ReLU(), conv_proto(),
-                   norm_proto(emsize), nn.ReLU()] + \
-                  residual_list(conv_proto, n//2-1, batch_norm, instance_norm)))
-        else:
-            self.recurrent = nn.Sequential(
-                *([expand_proto(), nn.ReLU(), conv_proto(), nn.ReLU()] + \
-                  residual_list(conv_proto, n//2-1, batch_norm, instance_norm)))
+        norm_proto = norm_protos[normalization]
+        self.recurrent = nn.Sequential(
+            *([expand_proto(), norm_proto(emsize), nn.ReLU(), conv_proto(),
+               norm_proto(emsize), nn.ReLU()] + \
+              residual_list(conv_proto, n//2-1, normalization)))
 
         self.postfix = nn.Sequential(
-                *(residual_list(conv_proto, n//2, batch_norm, instance_norm,
+                *(residual_list(conv_proto, n//2, normalization,
                                 last_relu=(output_embeddings_init is not None))))
 
         self.output_embedding = None
@@ -294,7 +279,7 @@ class ByteCNNDecoder(nn.Module):
 class ByteCNN(nn.Module):
     save_best = True
     def __init__(self, n=8, emsize=256, vocab_size=256,
-            batch_norm=True, instance_norm=False,
+            encoder_norm='batch', decoder_norm='batch',
             ignore_index=-1, eos=0,
             use_linear_layers=True, compress_channels=None,
             use_output_embeddings=False, dropout=0.0, unroll_r=None,
@@ -302,10 +287,10 @@ class ByteCNN(nn.Module):
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
-        self.batch_norm = batch_norm
-        self.instance_norm = instance_norm
-        self.encoder = ByteCNNEncoder(n, emsize, vocab_size, batch_norm=batch_norm,
-                instance_norm=instance_norm,
+        assert encoder_norm in norm_protos
+        assert decoder_norm in norm_protos
+        self.encoder = ByteCNNEncoder(n, emsize, vocab_size,
+                normalization=encoder_norm,
                 padding_idx=(ignore_index if ignore_index >= 0 else None),
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,
@@ -313,7 +298,7 @@ class ByteCNN(nn.Module):
                 use_external_batch_norm=encoder_use_external_batch_norm)
 
         self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
-                batch_norm=batch_norm, instance_norm=instance_norm or encoder_use_external_batch_norm, # XXX
+                normalization='instance'if encoder_use_external_batch_norm else decoder_norm,
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,
                 output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None))
@@ -475,62 +460,26 @@ class ByteCNN(nn.Module):
         return model
 
 
-class NonRecurrentByteCNNEncoder(nn.Module):
-    def __init__(self, n, emsize, input_len, batch_norm, batch_norm_eval_updates=False,
-            padding_idx=None):
-        super(NonRecurrentByteCNNEncoder, self).__init__()
-        self.n = n
-        self.emsize = emsize
-        assert n % 2 == 0, 'n should be a multiple of 2'
-        conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
-        conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
-        linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) \
-                                          for _ in xrange(k)]
-
-        assert 2**int(np.log2(input_len)) == input_len
-        n_nonrecurrent = int(np.log2(input_len) - 2)
-        self.n_nonrecurrent = n_nonrecurrent
-
-        self.embedding = nn.Embedding(emsize, emsize, padding_idx=padding_idx)
-        self.prefix = nn.Sequential(*(residual_list(conv_proto, n//2)))
-        self.nonrecurrent = nn.Sequential(*[nn.Sequential(*(residual_list(conv_proto, n//2) + [nn.MaxPool1d(kernel_size=2)])) \
-                                            for _ in range(n_nonrecurrent)])
-        self.postfix = nn.Sequential(*(residual_list(linear_proto, n//2-1) + \
-                                       [Residual(linear_proto, out_relu=False, batch_norm=batch_norm)]))
-
-        self.batch_norm = batch_norm
-        self.batch_norm_eval_updates = batch_norm_eval_updates
-
-    def forward(self, x):
-        assert x.size(1) >= 4
-        x = self.embedding(x).transpose(1, 2)
-        x = self.prefix(x)
-        x = self.nonrecurrent(x)
-        bsz = x.size(0)
-        return self.postfix(x.view(bsz, -1))
-
-
 class ConceptRNN(nn.Module):
     save_best = True
     def __init__(self, n=8, emsize=256, vocab_size=256, rnn_hid_size=None,
-            batch_norm=True, instance_norm=False,
+            encoder_norm='batch', decoder_norm='batch',
             ignore_index=-1, eos=0,
             use_linear_layers=True, compress_channels=None,
             use_output_embeddings=False):  ## XXX Check default emsize
         super(ConceptRNN, self).__init__()
         self.n = n
         self.emsize = emsize
-        self.batch_norm = batch_norm
-        self.instance_norm = instance_norm
-        self.encoder = ByteCNNEncoder(n, emsize, vocab_size, batch_norm=batch_norm,
-                instance_norm=instance_norm,
+        assert encoder_norm in norm_protos
+        assert decoder_norm in norm_protos
+        self.encoder = ByteCNNEncoder(n, emsize, vocab_size,
+                normalization=encoder_norm,
                 padding_idx=(ignore_index if ignore_index >= 0 else None),
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels)
 
         self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
-                batch_norm=batch_norm, instance_norm=instance_norm,
+                normalization=decoder_norm,
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,
                 output_embeddings_init=None)
@@ -553,7 +502,7 @@ class ConceptRNN(nn.Module):
         #x = self.encoder(x, r)
         #x = self.decoder(x, r)
         #return self.log_softmax(x)
-        raise "Not implemented" # TODO
+        raise NotImplementedError  # TODO
 
     def num_recurrences(self, x):
         rfloat = np.log2(x.size(-1))
@@ -671,171 +620,10 @@ class ConceptRNN(nn.Module):
         return model
 
 
-class NonRecurrentByteCNNDecoder(nn.Module):
-    def __init__(self, n, emsize, input_len, batch_norm):
-        super(NonRecurrentByteCNNDecoder, self).__init__()
-        self.n = n
-        self.emsize = emsize
-        assert n % 2 == 0, 'n should be a multiple of 2'
-        conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
-        conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
-        expand_proto = lambda: ExpandConv1d(emsize, emsize*2, **conv_kwargs)
-        linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
-        bn_proto = lambda c: nn.BatchNorm1d(c, momentum=0.1)
-        residual_list = lambda proto, k: [Residual(proto, batch_norm=batch_norm) \
-                                          for _ in xrange(k)]
-
-        assert 2**int(np.log2(input_len)) == input_len
-        n_nonrecurrent = int(np.log2(input_len) - 2)
-        self.n_nonrecurrent = n_nonrecurrent
-
-        self.prefix = nn.Sequential(*(residual_list(linear_proto, n//2)))
-        if batch_norm:
-            self.nonrecurrent = nn.Sequential(
-                *[nn.Sequential(
-                      *([expand_proto(), bn_proto(emsize), nn.ReLU(), conv_proto(),
-                         bn_proto(emsize), nn.ReLU()] + \
-                        residual_list(conv_proto, n//2-1)))
-                  for _ in range(n_nonrecurrent)])
-        else:
-            self.nonrecurrent = nn.Sequential(
-                *[nn.Sequential(
-                      *([expand_proto(), nn.ReLU(), conv_proto(), nn.ReLU()] + \
-                      residual_list(conv_proto, n_nonrecurrent//2-1)))
-                  for _ in range(n_nonrecurrent)])
-        self.postfix = nn.Sequential(*(residual_list(conv_proto, n//2)))
-
-    def forward(self, x):
-        x = self.prefix(x)
-        x = x.view(x.size(0), self.emsize, 4)
-        x = self.nonrecurrent(x)
-        return self.postfix(x)
-
-
-class NonRecurrentByteCNN(nn.Module):
-    save_best = True
-    def __init__(self, n=8, emsize=256, input_len=256, batch_norm=True,
-                 ignore_index=-1, eos=0):  ## XXX Check default emsize
-        super(NonRecurrentByteCNN, self).__init__()
-        self.n = n
-        self.emsize = emsize
-        self.input_len = input_len
-        self.batch_norm = batch_norm
-        self.encoder = NonRecurrentByteCNNEncoder(n, emsize, input_len, batch_norm=batch_norm,
-                padding_idx=(ignore_index if ignore_index >= 0 else None))
-        self.decoder = NonRecurrentByteCNNDecoder(n, emsize, input_len, batch_norm=batch_norm)
-        self.log_softmax = nn.LogSoftmax()
-        self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
-        self.eos = eos
-
-    def forward(self, x):
-        x = self.encoder(x)
-        x = self.decoder(x)
-        return self.log_softmax(x)
-
-    def _encode_decode(self, src, tgt):
-        features = self.encoder(src)
-        return self.decoder(features)
-
-    def train_on(self, batch_iterator, optimizer, scheduler=None, logger=None):
-        self.train()
-        losses = []
-        errs = []
-        for batch, (src, tgt) in enumerate(batch_iterator):
-            self.zero_grad()
-            src = Variable(src)
-            tgt = Variable(tgt)
-            decoded = self._encode_decode(src, tgt)
-            loss = self.criterion(
-                decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
-                tgt.view(-1))
-            loss.backward()
-            optimizer.step()
-
-            _, predictions = decoded.data.max(dim=1)
-            mask = (tgt.data != self.criterion.ignore_index)
-            err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() / mask.sum()
-            losses.append(loss.data[0])
-            errs.append(err_rate)
-            logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
-                             named_params=self.named_parameters)
-
-            if scheduler is not None:
-                scheduler.step()
-                logger.lr = optimizer.param_groups[0]['lr']
-
-        return losses, errs
-
-    def eval_on(self, batch_iterator, switch_to_evalmode=True):
-        self.eval() if switch_to_evalmode else self.train()
-        errs = 0
-        samples = 0
-        total_loss = 0
-        batch_cnt = 0
-        for (src, tgt) in batch_iterator:
-            src = Variable(src, volatile=True)
-            tgt = Variable(tgt, volatile=True)
-            decoded = self._encode_decode(src, tgt)
-            total_loss += self.criterion(
-                decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
-                tgt.view(-1))
-
-            _, predictions = decoded.data.max(dim=1)
-            mask = (tgt.data != self.criterion.ignore_index)
-            errs += (predictions[mask] != tgt.data[mask]).sum()
-            samples += mask.sum()
-            batch_cnt += 1
-        return {'loss': total_loss.data[0]/batch_cnt,
-                'acc': 100 - 100. * errs / samples,}
-
-    def try_on(self, batch_iterator, switch_to_evalmode=True):
-        self.eval() if switch_to_evalmode else self.train()
-        predicted = []
-        for (src, tgt) in batch_iterator:
-            print ("Batch size:", src.size())
-            src = Variable(src, volatile=True)
-            tgt = Variable(tgt, volatile=True)
-            decoded = self._encode_decode(src, tgt)
-            _, predictions = decoded.data.max(dim=1)
-
-            # Make into strings and append to decoded
-            for pred in predictions:
-                pred = list(pred.cpu().numpy())
-                pred = pred[:pred.index(self.eos)] if self.eos in pred else pred
-                pred = ''.join([chr(c) for c in pred])
-                predicted.append(pred)
-        return predicted
-
-    @staticmethod
-    def load_model(path):
-        """Load a model"""
-        model_pt = os.path.join(path, 'model.pt')
-        model_info = os.path.join(path, 'model.info')
-
-        with open(model_info, 'r') as f:
-            p = defaultdict(str)
-            p.update(dict(line.strip().split('=', 1) for line in f))
-
-        # Read and pop one by one, then raise if something's left
-        model_class = eval(p['model_class'])
-        del p['model_class']
-        model_kwargs = eval("dict(%s)" % p['model_kwargs'])
-        del p['model_kwargs']
-        if len(p) > 0:
-            raise ValueError('Unknown model params: ' + ', '.join(p.keys()))
-
-        assert p['model_class'] == 'NonRecurrentByteCNN', \
-            'Tried to load %s as ByteCNN' % p['model_class']
-        model = model_class(**model_kwargs)
-        with open(model_pt, 'rb') as f:
-            model.load_state_dict(torch.load(f))
-        return model
-
-
 class VAEByteCNN(nn.Module):
     save_best = True
     def __init__(self, n=8, emsize=256, vocab_size=256,
-                 batch_norm=True, instance_norm=False,
+                 encoder_norm='batch', decoder_norm='batch',
                  ignore_index=-1, eos=0,
                  use_linear_layers=True, compress_channels=None,
                  use_output_embeddings=False, unroll_r=None,
@@ -844,15 +632,15 @@ class VAEByteCNN(nn.Module):
         super(VAEByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
-        self.batch_norm = batch_norm
-        self.instance_norm = instance_norm
-        self.encoder = ByteCNNEncoder(n, emsize, vocab_size, batch_norm=batch_norm,
-                instance_norm=instance_norm,
+        assert encoder_norm in norm_protos
+        assert decoder_norm in norm_protos
+        self.encoder = ByteCNNEncoder(n, emsize, vocab_size,
+                normalization=encoder_norm,
                 padding_idx=(ignore_index if ignore_index >= 0 else None),
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels)
         self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
-                batch_norm=batch_norm, instance_norm=instance_norm,
+                normalization=decoder_norm,
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,
                 output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None))
