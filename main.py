@@ -208,7 +208,7 @@ try:
             switch_to_evalmode=model.encoder.use_external_batch_norm)
         print(repr(model.try_on(
             dataset.valid.sample_batch(
-                1 if model.normalization == 'instance' else args.batch_size),
+                1 if model.encoder.normalization == 'instance' else args.batch_size),
             switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
         logger.valid_log(val_loss)
 
