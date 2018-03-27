@@ -97,7 +97,7 @@ class Residual(nn.Module):
 
 class ByteCNNEncoder(nn.Module):
     def __init__(self, n, emsize, vocab_size, normalization, padding_idx=None,
-                 use_linear_layers=True, compress_channels=None, dropout=0.0,
+                 use_linear_layers=True, compress_channels=None,
                  dropout=0.0, use_external_batch_norm=False, max_r=None):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
@@ -114,8 +114,7 @@ class ByteCNNEncoder(nn.Module):
             res_list = [Residual(
                     proto,
                     out_relu=(last_relu or i < k-1),
-                    batch_norm=batch_norm,
-                    instance_norm=instance_norm,
+                    normalization=normalization,
                     dropout=dropout)
                 for i in xrange(k)]
             return res_list
@@ -181,7 +180,7 @@ class ByteCNNEncoder(nn.Module):
                 for i, layer in enumerate(self.recurrent):
                     if isinstance(layer, Residual):
                         bn1 = self.rec_batchnorm_list[offset + 2 * i]
-                        bn2 = self.rec_batchnorm_list[offset + 2 * i + 1])
+                        bn2 = self.rec_batchnorm_list[offset + 2 * i + 1]
                         x = layer(x, norm1=bn1, norm2=bn2)
                     else:
                         x = layer(x)

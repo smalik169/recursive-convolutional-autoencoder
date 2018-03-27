@@ -206,8 +206,10 @@ try:
         val_loss = model.eval_on(
             dataset.valid.iter_epoch(args.batch_size, evaluation=True),
             switch_to_evalmode=model.encoder.use_external_batch_norm)
-        print(repr(model.try_on(dataset.valid.sample_batch(1 if model.instance_norm else args.batch_size),
-                           switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
+        print(repr(model.try_on(
+            dataset.valid.sample_batch(
+                1 if model.normalization == 'instance' else args.batch_size),
+            switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
         logger.valid_log(val_loss)
 
         # Save the model if the validation loss is the best we've seen so far.
