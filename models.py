@@ -178,14 +178,16 @@ class ByteCNNEncoder(nn.Module):
         x = self.prefix(x)
 
         assert self.max_r is None or r <= self.max_r
-        for _ in xrange(r-2):
+        for rec_num in xrange(r-2):
             if not self.use_external_batch_norm:
                 x = self.recurrent(x)
             else:
+                offset = 2 * (self.n // 2) * rec_num
                 for i, layer in enumerate(self.recurrent):
                     if isinstance(layer, Residual):
-                        x = layer(x, norm1=self.rec_batchnorm_list[2*i],
-                                     norm2=self.rec_batchnorm_list[2*i+1])
+                        bn1 = self.rec_batchnorm_list[offset + 2 * i]
+                        bn2 = self.rec_batchnorm_list[offset + 2 * i + 1])
+                        x = layer(x, norm1=bn1, norm2=bn2)
                     else:
                         x = layer(x)
 
