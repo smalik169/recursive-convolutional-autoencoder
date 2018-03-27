@@ -311,7 +311,7 @@ class ByteCNN(nn.Module):
                 use_external_batch_norm=encoder_use_external_batch_norm)
 
         self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
-                batch_norm=batch_norm, instance_norm=instance_norm, #or encoder_use_external_batch_norm, # XXX
+                batch_norm=batch_norm, instance_norm=instance_norm or encoder_use_external_batch_norm, # XXX
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,
                 output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None))
