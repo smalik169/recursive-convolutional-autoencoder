@@ -174,9 +174,12 @@ class Explorer(object):
         self.vocab = None
 
     def analyze(self):
+
+        self.lenwise_validation_accuracy()
+        self.validation_accuracy()
         # for l in [16, 32, 64, 128, 256, 512]:
         #     self.validation_accuracy(min_len=l, max_len=l)
-        self.integrated_gradients(aim='output', sent=long_sentences[8])
+        # self.integrated_gradients(aim='output', sent=long_sentences[8])
     
         # self.decode_from_noise_vae()
         # self.integrated_gradients(aim='latent')
@@ -293,6 +296,17 @@ class Explorer(object):
         val_loss = self.model.eval_on(
             dataset.valid.iter_epoch(self.args.batch_size, evaluation=True),
             switch_to_evalmode=False)
+        loss_str = ' : '.join(
+            [' {} {:5.2f}'.format(k, v) for k, v in dict(val_loss).items()])
+        loss_str = ('valid {}'.format(loss_str))
+        print('\n', '-' * len(loss_str), loss_str, '-' * len(loss_str), '\n')
+
+    def lenwise_validation_accuracy(self, header=True):
+
+        print(_header('Lenwise validation accuracy'))
+        dataset = self.dataset
+
+        val_loss = self.model.lengthwise_eval_on(self.args.batch_size, dataset.valid)
         loss_str = ' : '.join(
             [' {} {:5.2f}'.format(k, v) for k, v in dict(val_loss).items()])
         loss_str = ('valid {}'.format(loss_str))
