@@ -50,6 +50,9 @@ parser.add_argument('--lr', type=float, default=0.001,
 # Default from the Byte-level CNN paper: half lr every 10 epochs
 parser.add_argument('--lr-lambda', type=str, default='lambda epoch: 0.5 ** (epoch // 10)',
                     help='learning rate based on base lr and iteration')
+parser.add_argument('--lr-step-lambda', type=str, default=None,
+                    help='learning rate based on base lr and step number, ' + \
+                         'if present `lr-lambda` is ignored')
 parser.add_argument('--epochs', type=int, default=40,
                     help='upper epoch limit')
 parser.add_argument('--batch-size', type=int, default=128, metavar='N',
@@ -144,7 +147,10 @@ optimizer_kwargs['lr'] = args.lr
 optimizer = optimizer_proto[args.optimizer](
     model.parameters(), **optimizer_kwargs)
 
-if args.lr_lambda:
+if args.lr_step_lambda:
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer, lr_lambda=eval(args.lr_step_lambda))
+elif args.lr_lambda:
     scheduler = torch.optim.lr_scheduler.LambdaLR(
         optimizer, lr_lambda=eval(args.lr_lambda))
 else:
@@ -191,15 +197,20 @@ try:
         logger.mark_epoch_start(epoch)
 
         model.train_on(dataset.train.iter_epoch(args.batch_size),
-                       optimizer, logger)
+                       optimizer,
+                       None if args.lr_step_lambda is None else scheduler,
+                       logger)
 
         # BatchNorm works better in train() mode (related to its running avgs)?
         # https://discuss.pytorch.org/t/model-eval-gives-incorrect-loss-for-model-with-batchnorm-layers/7561/3?u=smth
         val_loss = model.eval_on(
             dataset.valid.iter_epoch(args.batch_size, evaluation=True),
-            switch_to_evalmode=False)
-        print(repr(model.try_on(dataset.valid.sample_batch(1 if model.instance_norm else args.batch_size),
-                           switch_to_evalmode=False)[0]))
+            switch_to_evalmode=model.encoder.use_external_batch_norm)
+        print(repr(model.try_on(
+            dataset.valid.sample_batch(
+                1 if model.encoder.normalization == 'instance' else args.batch_size),
+            #switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
+            switch_to_evalmode=False)[0]))
         logger.valid_log(val_loss)
 
         # Save the model if the validation loss is the best we've seen so far.
@@ -214,7 +225,7 @@ try:
         #         logger.save_model_state_dict(model.state_dict())
         #         best_val_loss = val_loss['nll_per_w']
 
-        if scheduler is not None:
+        if args.lr_step_lambda is None and scheduler is not None:
             scheduler.step()
             logger.lr = optimizer.param_groups[0]['lr']
 
