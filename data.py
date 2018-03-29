@@ -59,7 +59,7 @@ class Cache(object):
         lines = Cache.byte_file_to_lines(fpath, max_len=np.inf)
         # Cache data matrices
         for k, v in lines.items():
-            cached_path = path + ('.len%d.uint8' % k)
+            cached_path = fpath + ('.len%d.uint8' % k)
             if not os.path.isfile(cached_path):
                 v.tofile(cached_path)
 

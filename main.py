@@ -209,7 +209,8 @@ try:
         print(repr(model.try_on(
             dataset.valid.sample_batch(
                 1 if model.encoder.normalization == 'instance' else args.batch_size),
-            switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
+            #switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
+            switch_to_evalmode=False)[0]))
         logger.valid_log(val_loss)
 
         # Save the model if the validation loss is the best we've seen so far.
