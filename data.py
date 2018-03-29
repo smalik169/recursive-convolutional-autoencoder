@@ -246,7 +246,7 @@ class UTF8File(object):
 
 
 class UTF8WordStarFile(object):
-    def __init__(self, path, cuda, p=0.2, max_w_len=1000, **kwargs):
+    def __init__(self, path, cuda, p=0.5, max_w_len=1000, **kwargs):
         super(UTF8WordStarFile, self).__init__(path, cuda, **kwargs)
         self.p = p
         self.max_w_len = max_w_len
@@ -321,7 +321,7 @@ class UTF8WordStarFile(object):
 
 
 class UTF8CharStarFile(UTF8File):
-    def __init__(self, path, cuda, p=0.2, **kwargs):
+    def __init__(self, path, cuda, p=0.5, **kwargs):
         super(UTF8CharStarFile, self).__init__(path, cuda, **kwargs)
         self.p = p
 
