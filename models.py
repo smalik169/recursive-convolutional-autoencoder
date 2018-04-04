@@ -61,13 +61,14 @@ class ExpandConv1d(nn.Module):
     def __init__(self, *args, **kwargs):
         super(ExpandConv1d, self).__init__()
         self.conv1d = nn.Conv1d(*args, **kwargs)
+        self.out_channels = self.conv1d.out_channels // 2
 
     def forward(self, x):
         # Output of conv1d: (N,Cout,Lout)
         x = self.conv1d(x)
-        bsz, c, l = x.size()
-        x = x.view(bsz, c // 2, 2, l).transpose(2, 3).contiguous()
-        return x.view(bsz, c // 2, 2 * l).contiguous()
+        bsz, _, l = x.size()
+        x = x.view(bsz, self.out_channels, 2, l).transpose(2, 3).contiguous()
+        return x.view(bsz, self.out_channels, 2 * l).contiguous()
 
 
 class Residual(nn.Module):
@@ -87,10 +88,12 @@ class Residual(nn.Module):
         self.bn2 = norm_protos[normalization](self.num_channels(self.layer2))
 
     def num_channels(self, layer):
-        if type(layer) is ExpandConv1d:
-            return layer.conv1d.out_channels
-        elif type(layer) is nn.Conv1d:
+        if type(layer) in [nn.Conv1d, ExpandConv1d]:
             return layer.out_channels
+        #if type(layer) is ExpandConv1d:
+        #    return layer.conv1d.out_channels
+        #elif type(layer) is nn.Conv1d:
+        #    return layer.out_channels
         elif type(layer) is nn.Linear:
             return layer.weight.size(0)
         else:
