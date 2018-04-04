@@ -45,6 +45,8 @@ parser.add_argument('--model', type=str, default='ByteCNN',
                     help='model class')
 parser.add_argument('--model-kwargs', type=str, default='',
                     help='model kwargs')
+parser.add_argument('--bn-lenwise-eval', default=False, action='store_true',
+                    help='calculate statistics for each length of data separately')
 parser.add_argument('--lr', type=float, default=0.001,
                     help='initial learning rate')
 # Default from the Byte-level CNN paper: half lr every 10 epochs
@@ -201,19 +203,22 @@ try:
                        None if args.lr_step_lambda is None else scheduler,
                        logger)
 
-        # BatchNorm works better in train() mode (related to its running avgs)?
-        # https://discuss.pytorch.org/t/model-eval-gives-incorrect-loss-for-model-with-batchnorm-layers/7561/3?u=smth
-        sanity_train_loss = model.eval_on(
-            dataset.sanity.iter_epoch(args.batch_size, evaluation=True),
-            switch_to_evalmode=model.encoder.use_external_batch_norm)
-        val_loss = model.eval_on(
-            dataset.valid.iter_epoch(args.batch_size, evaluation=True),
-            switch_to_evalmode=model.encoder.use_external_batch_norm)
+        if args.bn_lenwise_eval:
+            val_loss = model.lengthwise_eval_on(args.batch_size, dataset.valid)
+            sanity_train_loss = model.lengthwise_eval_on(args.batch_size, dataset.sanity)
+        else:
+            sanity_train_loss = model.eval_on(
+                    dataset.sanity.iter_epoch(args.batch_size, evaluation=True),
+                    switch_to_evalmode=model.encoder.use_external_batch_norm)
+            val_loss = model.eval_on(
+                    dataset.valid.iter_epoch(args.batch_size, evaluation=True),
+                    switch_to_evalmode=model.encoder.use_external_batch_norm)
+
+        try_bsz = (1 if model.encoder.normalization == 'instance' else args.batch_size)
+        try_batch = dataset.valid.sample_batch(
+            try_bsz, sample_sentence=data.SAMPLE_SENTENCE)
         print(repr(model.try_on(
-            dataset.valid.sample_batch(
-                1 if model.encoder.normalization == 'instance' else args.batch_size),
-            #switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
-            switch_to_evalmode=False)[0]))
+            try_batch, switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
         logger.valid_log(sanity_train_loss, mode='sanity')
         logger.valid_log(val_loss, mode='valid')
 

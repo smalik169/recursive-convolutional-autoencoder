@@ -22,6 +22,32 @@ def eval_all_but_batchnorm(module): # XXX temporary solution
 
     return module
 
+def reset_batchnorms(module, momentum, zero_var=False): # XXX temporary solution
+    if any([isinstance(module, bn) for bn in
+        [nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d]]):
+        module.running_mean.fill_(0)
+        if zero_var:
+            module.running_var.fill_(0)
+        else:
+            module.running_var.fill_(1)
+        module.momentum = momentum
+
+    for child in module.children():
+        reset_batchnorms(child, momentum, zero_var)
+
+    return module
+
+def apply_to_batchnorm(module, fun): # XXX temporary solution
+    if any([isinstance(module, bn) for bn in
+        [nn.BatchNorm1d, nn.BatchNorm2d, nn.BatchNorm3d]]):
+        fun(module)
+
+    for child in module.children():
+        apply_to_batchnorm(child, fun)
+
+    return module
+
+
 class NoopLayer(nn.Module):
     def forward(self, x):
         return x
@@ -98,12 +124,12 @@ class Residual(nn.Module):
 class ByteCNNEncoder(nn.Module):
     def __init__(self, n, emsize, vocab_size, normalization, padding_idx=None,
                  use_linear_layers=True, compress_channels=None,
-                 dropout=0.0, use_external_batch_norm=False, external_batch_r=None):
+                 dropout=0.0, use_external_batch_norm=False, external_batch_max_r=None):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
         self.emsize = emsize
         self.vocab_size = vocab_size
-        self.external_batch_r = external_batch_r
+        self.external_batch_max_r = external_batch_max_r
         self.normalization = normalization
         assert n % 2 == 0, 'n should be a multiple of 2'
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
@@ -126,17 +152,18 @@ class ByteCNNEncoder(nn.Module):
 
         self.recurrent = nn.Sequential(
                 *(residual_list(conv_proto, n//2,
-                    normalization=None if use_external_batch_norm else normalization,
+                    normalization=None if normalization == 'batch' and use_external_batch_norm else normalization,
                     dropout=dropout) + \
                 [nn.MaxPool1d(kernel_size=2)]))
         if use_external_batch_norm:
-            assert external_batch_r is not None, \
+            assert external_batch_max_r is not None, \
                     'to use external batchnorm in reccurent part' + \
                     ' you need to specify maximum number of recurrent steps'
             self.rec_batchnorm_list = nn.ModuleList([
                 nn.BatchNorm1d(emsize, momentum=0.1)
-                for _ in range((2 * (n // 2)) * external_batch_r)])
+                for _ in range((2 * (n // 2)) * external_batch_max_r)])
 
+        self.use_external_batch_norm = use_external_batch_norm
 
         # compress_channels should be a power of 2
         self.use_linear_layers = use_linear_layers
@@ -164,15 +191,13 @@ class ByteCNNEncoder(nn.Module):
         else:
             self.postfix = None
 
-        self.use_external_batch_norm = use_external_batch_norm
-
     def forward(self, x, r, embed=True):
         if embed == True:
             assert x.size(1) >= 4
             x = self.embedding(x).transpose(1, 2)
         x = self.prefix(x)
 
-        assert self.external_batch_r is None or r <= self.external_batch_r
+        assert self.external_batch_max_r is None or r <= self.external_batch_max_r
         for rec_num in xrange(r-2):
             if not self.use_external_batch_norm:
                 x = self.recurrent(x)
@@ -201,11 +226,13 @@ class ByteCNNEncoder(nn.Module):
 class ByteCNNDecoder(nn.Module):
     def __init__(self, n, emsize, vocab_size, normalization,
                  use_linear_layers=True, compress_channels=None,
-                 output_embeddings_init=None):
+                 output_embeddings_init=None,
+                 use_external_batch_norm=False, external_batch_max_r=None):
         super(ByteCNNDecoder, self).__init__()
         self.n = n
         self.emsize = emsize
         self.vocab_size = vocab_size
+        self.external_batch_max_r = external_batch_max_r
         self.normalization = normalization
         assert n % 2 == 0, 'n should be a multiple of 2'
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
@@ -240,15 +267,25 @@ class ByteCNNDecoder(nn.Module):
             self.prefix = None
 
         # Set a recurrent layer
-        norm_proto = norm_protos[normalization]
         self.recurrent = nn.Sequential(
-            *([expand_proto(), norm_proto(emsize), nn.ReLU(), conv_proto(),
-               norm_proto(emsize), nn.ReLU()] + \
-              residual_list(conv_proto, n//2-1, normalization)))
+            *([Residual(expand_proto, conv_proto, out_relu=True, 
+                        normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization),
+                        residual_connection=False)] + \
+              residual_list(conv_proto, n//2-1,
+                            normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization))))
 
         self.postfix = nn.Sequential(
-                *(residual_list(conv_proto, n//2, normalization,
+                *(residual_list(conv_proto, n//2,
+                                normalization=normalization,
                                 last_relu=(output_embeddings_init is not None))))
+        if use_external_batch_norm:
+            assert external_batch_max_r is not None, \
+                    'to use external batchnorm in reccurent part' + \
+                    ' you need to specify maximum number of recurrent steps'
+            self.rec_batchnorm_list = nn.ModuleList([
+                nn.BatchNorm1d(emsize, momentum=0.1) for _ in range(2 * (n // 2) * external_batch_max_r)])
+
+        self.use_external_batch_norm = use_external_batch_norm
 
         self.output_embedding = None
         if output_embeddings_init:
@@ -266,8 +303,19 @@ class ByteCNNDecoder(nn.Module):
             assert self.prefix is None
             x = x.view(x.size(0), self.emsize, 4)
 
-        for _ in xrange(r-2):
-            x = self.recurrent(x)
+        assert self.external_batch_max_r is None or r <= self.external_batch_max_r
+        for rec_num in xrange(r-2):
+            if not self.use_external_batch_norm:
+                x = self.recurrent(x)
+            else:
+                offset = 2 * (self.n // 2) * rec_num
+                for i, layer in enumerate(self.recurrent):
+                    if isinstance(layer, Residual):
+                        bn1 = self.rec_batchnorm_list[offset + 2 * i]
+                        bn2 = self.rec_batchnorm_list[offset + 2 * i + 1]
+                        x = layer(x, norm1=bn1, norm2=bn2)
+                    else:
+                        x = layer(x)
 
         x = self.postfix(x)
 
@@ -284,7 +332,7 @@ class ByteCNN(nn.Module):
             ignore_index=-1, eos=0,
             use_linear_layers=True, compress_channels=None,
             use_output_embeddings=False, dropout=0.0, unroll_r=None,
-            encoder_use_external_batch_norm=False, external_batch_r=None):
+            use_external_batch_norm=False, external_batch_max_r=None):
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -295,16 +343,16 @@ class ByteCNN(nn.Module):
                 padding_idx=(ignore_index if ignore_index >= 0 else None),
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,
-                dropout=dropout, external_batch_r=external_batch_r,
-                use_external_batch_norm=encoder_use_external_batch_norm)
+                dropout=dropout,
+                use_external_batch_norm=use_external_batch_norm,
+                external_batch_max_r=external_batch_max_r)
 
         self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
-                normalization=(
-                    'instance' if encoder_use_external_batch_norm \
-                            and decoder_norm == 'batch'  else decoder_norm),
+                normalization=decoder_norm,
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,
-                output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None))
+                output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None),
+                use_external_batch_norm=use_external_batch_norm, external_batch_max_r=external_batch_max_r)
 
         self.log_softmax = nn.LogSoftmax()
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index, size_average=False)
@@ -413,6 +461,58 @@ class ByteCNN(nn.Module):
         return {'loss': total_loss.data[0] / samples, #batch_cnt,
                 'acc': 100 - 100. * errs / samples,
                 'err': 100. * errs / samples}
+
+    def lengthwise_eval_on(self, bsz, dataset, num_batches_for_stats=100):
+
+        def double_running(bn): bn.running_mean *= 2 ; bn.running_var *= 2
+        def normalize_running(bn, i): bn.running_mean /= (1.0*i) ; bn.running_var /= (1.0*i)
+
+        errs = 0
+        samples = 0
+        total_loss = 0
+        batch_cnt = 0
+        lengthwise_acc = {}
+        for L in dataset.sentence_lengths():
+            this_samples = 0
+            this_errs = 0
+            self.train()
+
+            # We want to aggregate perfect averages instead of running averages
+            # To do so we set momentum=0.5 and multiply by 2.0 all params every iteration
+            # Lastly normalize the parameters by (i+1) - the number of batches
+            #
+            # NOTE If not halving/normalizing, then zero_var=False
+            reset_batchnorms(self, momentum=0.5, zero_var=True)
+
+            # Note that evaluation= controls shuffling
+            for i, (src, tgt) in enumerate(dataset.iter_epoch(bsz, evaluation=True, len_=L)):
+                src = Variable(src, volatile=True)
+                tgt = Variable(tgt, volatile=True)
+                self._encode_decode(src, tgt)
+                apply_to_batchnorm(self, double_running)
+                if i == num_batches_for_stats:
+                    break
+            apply_to_batchnorm(self, lambda bn: normalize_running(bn, (i+1)))
+            self.eval()
+            for (src, tgt) in dataset.iter_epoch(bsz, evaluation=True, len_=L):
+                src = Variable(src, volatile=True)
+                tgt = Variable(tgt, volatile=True)
+                decoded = self._encode_decode(src, tgt)
+                total_loss += self.criterion(
+                    decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
+                    tgt.view(-1))
+
+                _, predictions = decoded.data.max(dim=1)
+                mask = (tgt.data != self.criterion.ignore_index)
+                errs += (predictions[mask] != tgt.data[mask]).sum()
+                samples += mask.sum()
+                batch_cnt += 1
+                this_errs += (predictions[mask] != tgt.data[mask]).sum()
+                this_samples += mask.sum()
+            lengthwise_acc[L] = str(int(100 - 100. * this_errs / this_samples)) + '%'
+        print(sorted(lengthwise_acc.items()))
+        return {'loss': total_loss.data[0]/batch_cnt,
+                'acc': 100 - 100. * errs / samples,}
 
     def try_on(self, batch_iterator, switch_to_evalmode=True, r_tgt=None,
                return_outputs=False):
