@@ -307,7 +307,7 @@ class ByteCNN(nn.Module):
                 output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None))
 
         self.log_softmax = nn.LogSoftmax()
-        self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index, size_average=False)
         self.eos = eos
         self.unroll_r = None
         if unroll_r:
@@ -364,19 +364,21 @@ class ByteCNN(nn.Module):
             src = Variable(src)
             tgt = Variable(tgt)
             decoded = self._encode_decode(src, tgt)
+            mask = (tgt.data != self.criterion.ignore_index)
             loss = self.criterion(
                 decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
                 tgt.view(-1))
-            loss.backward()
+            (loss / mask.sum()).backward()
             optimizer.step()
 
             _, predictions = decoded.data.max(dim=1)
-            mask = (tgt.data != self.criterion.ignore_index)
-            err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() / mask.sum()
+            err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() #/ mask.sum()
             losses.append(loss.data[0])
             errs.append(err_rate)
-            logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
-                             named_params=self.named_parameters)
+            #logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
+            #                 named_params=self.named_parameters)
+            logger.train_log(batch, {'loss': loss.data[0], 'err': err_rate,},
+                             named_params=self.named_parameters, num_samples=mask.sum())
 
             if scheduler is not None:
                 scheduler.step()
@@ -408,8 +410,9 @@ class ByteCNN(nn.Module):
             errs += (predictions[mask] != tgt.data[mask]).sum()
             samples += mask.sum()
             batch_cnt += 1
-        return {'loss': total_loss.data[0]/batch_cnt,
-                'acc': 100 - 100. * errs / samples,}
+        return {'loss': total_loss.data[0] / samples, #batch_cnt,
+                'acc': 100 - 100. * errs / samples,
+                'err': 100. * errs / samples}
 
     def try_on(self, batch_iterator, switch_to_evalmode=True, r_tgt=None,
                return_outputs=False):

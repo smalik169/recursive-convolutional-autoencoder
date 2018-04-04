@@ -226,8 +226,9 @@ class Logger(object):
         self.model_path = self.logdir + "model.pt"
         self.current_model_path = self.logdir + "current_model.pt"
         self.writers = {name: Writer(self.logdir + name)
-                        for name in ['train', 'valid', 'test']}
+                        for name in ['train', 'sanity', 'valid', 'test']}
         self.total_losses = None
+        self.num_samples = None
         self.epoch = 0
         self.lr = initial_lr
         self.log_interval = log_interval
@@ -241,7 +242,7 @@ class Logger(object):
     def mark_epoch_start(self, epoch):
         self.epoch = epoch
         self.minibatch_start_time = self.epoch_start_time = time.time()
-        self.total_losses = 0
+        self.total_losses = None
 
     def save_model_state_dict(self, model_state_dict, current=False):
         path = self.model_path if not current else self.current_model_path
@@ -297,7 +298,7 @@ class Logger(object):
         with open(self.logdir+"model.info", 'w') as f:
             f.write(info.strip())
 
-    def train_log(self, batch, batch_losses, named_params):
+    def train_log(self, batch, batch_losses, named_params, num_samples):
 
         # logger.train_log(batch, {'nll_per_w': nll.data[0]},
         #                              named_params=self.named_parameters)
@@ -305,16 +306,18 @@ class Logger(object):
         #     print("Minibatch {0: >3}  | loss {1: >5.2f} | err rate {2: >5.2f}%" \
         #           .format(batch, losses[-1], err_rate))
 
-        if not self.total_losses:
+        if self.total_losses is None:
             self.total_losses = dict(batch_losses)
+            self.num_samples = num_samples
         else:
             for k, v in batch_losses.iteritems():
                 self.total_losses[k] += v
+                self.num_samples += num_samples
 
         if batch % self.log_interval == 0 and batch > 0:
             elapsed = (time.time() - self.minibatch_start_time
                        ) * 1000 / self.log_interval
-            cur_loss = {k: v / self.log_interval
+            cur_loss = {k: v / self.num_samples #self.log_interval
                         for k, v in self.total_losses.items()}
             # cur_loss['pplx'] = np.exp(cur_loss['nll_per_w'])
             loss_str = ' | '.join(
@@ -334,17 +337,18 @@ class Logger(object):
                         named_params=named_params)
 
             self.total_losses = None
+            self.num_samples = None
             self.minibatch_start_time = time.time()
 
-    def valid_log(self, val_loss, batch=0):
+    def valid_log(self, val_loss, batch=0, mode='valid'):
         elapsed = time.time() - self.epoch_start_time
         losses = dict(val_loss)
         # losses['pplx'] = np.exp(val_loss['nll_per_w'])
 
-        loss_str = ' : '.join(
+        loss_str = mode + ' ' + ' | '.join(
             [' {} {:5.2f}'.format(k, v) for k, v in losses.items()])
         loss_str = ('| end of epoch {:3d} | time: {:5.2f}s | '
-                    'valid {}'.format(self.epoch, elapsed, loss_str))
+                    '{}'.format(self.epoch, elapsed, loss_str))
         print('-' * len(loss_str))
         print(loss_str)
         print('-' * len(loss_str))
@@ -352,7 +356,7 @@ class Logger(object):
         losses['s/epoch'] = elapsed
         losses['learning_rate'] = self.lr
         step = self.epoch * self.num_batches + batch
-        self.tb_log(mode="valid", info=losses,
+        self.tb_log(mode=mode, info=losses,
                     step=step, named_params=lambda: [])
 
     def mem_log(self, mode, named_params, batch):

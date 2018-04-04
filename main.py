@@ -203,6 +203,9 @@ try:
 
         # BatchNorm works better in train() mode (related to its running avgs)?
         # https://discuss.pytorch.org/t/model-eval-gives-incorrect-loss-for-model-with-batchnorm-layers/7561/3?u=smth
+        sanity_train_loss = model.eval_on(
+            dataset.sanity.iter_epoch(args.batch_size, evaluation=True),
+            switch_to_evalmode=model.encoder.use_external_batch_norm)
         val_loss = model.eval_on(
             dataset.valid.iter_epoch(args.batch_size, evaluation=True),
             switch_to_evalmode=model.encoder.use_external_batch_norm)
@@ -211,13 +214,14 @@ try:
                 1 if model.encoder.normalization == 'instance' else args.batch_size),
             #switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
             switch_to_evalmode=False)[0]))
-        logger.valid_log(val_loss)
+        logger.valid_log(sanity_train_loss, mode='sanity')
+        logger.valid_log(val_loss, mode='valid')
 
         # Save the model if the validation loss is the best we've seen so far.
         if args.save_state:
             logger.save_model_state_dict(model.state_dict(), current=True)
             logger.save_training_state(
-                optimizer, args, 
+                optimizer, args,
                 model_state=(model.get_state() if hasattr(model, 'get_state') else None))
 
         # XXX

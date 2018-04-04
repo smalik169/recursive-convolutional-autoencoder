@@ -22,10 +22,14 @@ SAMPLE_SENTENCE = 'On a beautiful morning, a busty Amazon rode through a forest.
 
 class Cache(object):
     @staticmethod
-    def byte_file_to_lines(path, min_len=4, max_len=np.inf):
+    def byte_file_to_lines(path, min_len=4, max_len=np.inf, random_lines=-1):
         lines_by_len = defaultdict(list)
         with codecs.open(path, 'r', 'utf-8') as f:
-            for line in f:
+            lines = f.readlines()
+            if random_lines > 0:
+                lines = [lines[i] for i in np.random.choice(
+                    len(lines), size=random_lines, replace=False)]
+            for line in lines:
                 bytes_ = [ord(c) for c in line.strip().encode('utf-8')] + [EOS]
                 power2_len = int(np.ceil(np.log2(len(bytes_))))
                 bytes_ += [EMPTY] * (2 ** power2_len - len(bytes_))
@@ -33,6 +37,7 @@ class Cache(object):
                 ### if len(bytes_) < 4:
                 ###     continue
                 lines_by_len[len(bytes_)].append(bytes_)
+            del lines
         # Convert to ndarrays
         dropped_shapes = []
         for k in lines_by_len.keys():
@@ -53,13 +58,14 @@ class Cache(object):
                 if f.startswith(base + '.len') and f.endswith('.uint8')]
 
     @staticmethod
-    def build(fpath):
-        if len(Cache.files(fpath)) > 0:
+    def build(fpath, random_lines=-1, output_path=None):
+        output_path = output_path or fpath
+        if len(Cache.files(output_path)) > 0:
             return
-        lines = Cache.byte_file_to_lines(fpath, max_len=np.inf)
+        lines = Cache.byte_file_to_lines(fpath, max_len=np.inf, random_lines=random_lines)
         # Cache data matrices
         for k, v in lines.items():
-            cached_path = fpath + ('.len%d.uint8' % k)
+            cached_path = output_path + ('.len%d.uint8' % k)
             if not os.path.isfile(cached_path):
                 v.tofile(cached_path)
 
@@ -174,7 +180,7 @@ class RandomFile(object):
 
 class UTF8File(object):
     def __init__(self, path, cuda, rng=None, fixed_len=None, p=None,
-                 min_len=4, max_len=np.inf, use_cache=True):
+                 min_len=4, max_len=np.inf, use_cache=True, random_lines=-1):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
         if max_len is not np.inf and fixed_len is not None:
@@ -185,10 +191,15 @@ class UTF8File(object):
         if use_cache:
             self.lines = Cache.load(path, min_len=min_len, max_len=self.max_len)
         else:
-            self.lines = Cache.byte_file_to_lines(path, min_len=min_len, max_len=self.max_len)
+            self.lines = Cache.byte_file_to_lines(
+                    path, min_len=min_len, max_len=self.max_len,
+                    random_lines=random_lines)
 
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
+
+    def get_num_sentences(self):
+        return sum(arr.shape[0] for arr in self.lines.values())
 
     def maybe_pad(self, batch):
         if self.fixed_len:
@@ -245,7 +256,7 @@ class UTF8File(object):
         yield (batch_tensor, batch_tensor) #(source, target)
 
 
-class UTF8WordStarFile(object):
+class UTF8WordStarFile(UTF8File):
     def __init__(self, path, cuda, p=0.5, max_w_len=1000, **kwargs):
         super(UTF8WordStarFile, self).__init__(path, cuda, **kwargs)
         self.p = p
@@ -399,8 +410,23 @@ class UTF8Corpus(object):
             Cache.build(path + 'train.txt')
             Cache.build(path + 'valid.txt')
             Cache.build(path + 'test.txt')
+
         subset_kwargs.update(dict(rng=rng, fixed_len=fixed_len,
             min_len=min_len, max_len=max_len, use_cache=use_cache))
+
         self.train = file_class(path + 'train.txt', cuda, **subset_kwargs) if sets['train'] else None
         self.valid = file_class(path + 'valid.txt', cuda, **subset_kwargs) if sets['valid'] else None
         self.test = file_class(path + 'test.txt', cuda, **subset_kwargs) if sets['test'] else None
+
+        sanity_file_exists = os.path.isfile(path + 'train.sanity.txt')
+        random_sentences_num = -1 if sanity_file_exists else self.valid.get_num_sentences()
+        if use_cache:
+            Cache.build(path + ('train.sanity.txt' if sanity_file_exists else 'train.txt'),
+                        random_lines=random_sentences_num,
+                        output_path=path + 'train.sanity.txt')
+
+        self.sanity = file_class(
+                path + ('train.sanity.txt' if sanity_file_exists or use_cache else 'train.txt'),
+                cuda,
+                random_lines=random_sentences_num,
+                **subset_kwargs) if sets['valid'] and sets['train'] else None
