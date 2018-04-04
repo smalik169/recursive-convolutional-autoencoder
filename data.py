@@ -39,10 +39,10 @@ class Cache(object):
             if min_len <= k <= max_len:
                 lines_by_len[k] = np.asarray(lines_by_len[k], dtype=np.uint8)
             else:
-                dropped_shapes.append(k.shape)
+                dropped_shapes.append(k)
                 del lines_by_len[k]
         if dropped_shapes:
-            print('Dropping too short/long matrices %s' % dropped_shapes)
+            print('Dropping too short/long lines %s' % dropped_shapes)
         return lines_by_len
 
     @staticmethod
@@ -114,6 +114,9 @@ class RandomFile(object):
         self.lowest_byte = lowest_byte
         self.highest_byte = highest_byte
 
+    def sentence_lengths(self):
+        raise NotImplementedError
+
     def get_num_batches(self, bsz):
         return self.num_samples // bsz
 
@@ -124,12 +127,14 @@ class RandomFile(object):
         else:
             return batch
 
-    def iter_epoch(self, bsz, evaluation=False):
+    def iter_epoch(self, bsz, evaluation=False, len_=None):
         is_power_of_2 = lambda x: 2**int(np.log2(x)) == x
         assert is_power_of_2(self.min_len)
         assert self.max_len is np.inf or is_power_of_2(self.max_len)
         assert self.fixed_len is None or is_power_of_2(self.fixed_len)
-        if self.fixed_len is not None:
+        if len_:
+            lengths = [len_]
+        elif self.fixed_len is not None:
             lengths = [self.fixed_len]
         else:
             log_min_len = int(np.log2(self.min_len))
@@ -145,24 +150,26 @@ class RandomFile(object):
                 batch_tensor = batch_tensor.cuda()
             yield (batch_tensor, batch_tensor) #(source, target)
 
-    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
-        sample_sentence = sample_sentence.encode('utf-8')
-        print("Source:", sample_sentence)
-        batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
-        if self.fixed_len:
-            batch_len = self.fixed_len
-        elif self.max_len:
-            batch_len = min(batch_len, self.max_len)
-
-        if len(sample_sentence) > batch_len:
-            sample_sentence = sample_sentence[:(batch_len-1)]
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE, len_=None):
+        assert len_ is None or sample_sentence is None
+        assert len_ is not None or sample_sentence is not None
+        if sample_sentence:
+            sample_sentence = sample_sentence.encode('utf-8')
+            print("Source:", sample_sentence)
+            len_ = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
+            if self.fixed_len:
+                len_ = self.fixed_len
+            elif self.max_len:
+                len_ = min(len_, self.max_len)
+            if len(sample_sentence) > len_:
+                sample_sentence = sample_sentence[:(len_-1)]
 
         batch = self.rng.randint(
-            self.lowest_byte, self.highest_byte+1, (bsz, batch_len), dtype=np.uint8)
+            self.lowest_byte, self.highest_byte+1, (bsz, len_), dtype=np.uint8)
         bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
-                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
+                             [EMPTY] * (len_ - len(sample_sentence) - 1)],
                             dtype=np.uint8)
-        assert bytes_.shape[1] == batch_len, bytes_.shape
+        assert bytes_.shape[1] == len_, bytes_.shape
         batch[0] = bytes_
         batch = self.maybe_pad(batch)
         batch_tensor = torch.from_numpy(batch).long()
@@ -187,6 +194,9 @@ class UTF8File(object):
         else:
             self.lines = Cache.byte_file_to_lines(path, min_len=min_len, max_len=self.max_len)
 
+    def sentence_lengths(self):
+        return sorted([k for k in self.lines.keys() if k > 0])
+
     def get_num_batches(self, bsz):
         return sum(arr.shape[0] // bsz for arr in self.lines.values())
 
@@ -197,9 +207,11 @@ class UTF8File(object):
         else:
             return batch
 
-    def iter_epoch(self, bsz, evaluation=False):
+    def iter_epoch(self, bsz, evaluation=False, len_=None):
         if evaluation:
-            for len_, data in self.lines.items():
+            for lines_len, data in self.lines.items():
+                if len_ and lines_len != len_:
+                    continue
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
                     batch = self.maybe_pad(batch)
                     batch_tensor = torch.from_numpy(batch).long()
@@ -208,35 +220,40 @@ class UTF8File(object):
                     yield (batch_tensor, batch_tensor) #(source, target)
         else:
             batch_inds = []
-            for len_, data in self.lines.items():
+            for lines_len, data in self.lines.items():
+                if len_ and lines_len != len_:
+                    continue
                 num_batches = data.shape[0] // bsz
                 if num_batches == 0:
                     continue
                 all_inds = np.random.permutation(data.shape[0])
                 all_inds = all_inds[:(bsz * num_batches)]
-                batch_inds += [(len_,inds) \
+                batch_inds += [(lines_len,inds) \
                                for inds in np.split(all_inds, num_batches)]
             np.random.shuffle(batch_inds)
-            for len_, inds in batch_inds:
-                batch = self.lines[len_][inds]
+            for lines_len, inds in batch_inds:
+                batch = self.lines[lines_len][inds]
                 batch = self.maybe_pad(batch)
                 batch_tensor = torch.from_numpy(batch).long()
                 if self.cuda:
                     batch_tensor = batch_tensor.cuda()
                 yield (batch_tensor, batch_tensor) #(source, target)
 
-    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
-        sample_sentence = sample_sentence.encode('utf-8')
-        print("Source:", sample_sentence)
-        batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
-        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
-                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
-                            dtype=np.uint8)
-        assert bytes_.shape[1] == batch_len, bytes_.shape
-        # batch_tensor = torch.from_numpy(bytes_).long() 
-        inds = np.random.choice(len(self.lines[batch_len]), bsz)
-        batch = self.lines[batch_len][inds]
-        batch[0] = bytes_
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE, len_=None):
+        assert len_ is None or sample_sentence is None
+        assert len_ is not None or sample_sentence is not None
+        if sample_sentence:
+            sample_sentence = sample_sentence.encode('utf-8')
+            print("Source:", sample_sentence)
+            len_ = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
+            bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
+                                 [EMPTY] * (len_ - len(sample_sentence) - 1)],
+                                dtype=np.uint8)
+            assert bytes_.shape[1] == len_, bytes_.shape
+        inds = np.random.choice(len(self.lines[len_]), bsz)
+        batch = self.lines[len_][inds]
+        if sample_sentence:
+            batch[0] = bytes_
         batch = self.maybe_pad(batch)
         batch_tensor = torch.from_numpy(batch).long()
 
@@ -245,7 +262,7 @@ class UTF8File(object):
         yield (batch_tensor, batch_tensor) #(source, target)
 
 
-class UTF8WordStarFile(object):
+class UTF8WordStarFile(UTF8File):
     def __init__(self, path, cuda, p=0.5, max_w_len=1000, **kwargs):
         super(UTF8WordStarFile, self).__init__(path, cuda, **kwargs)
         self.p = p
@@ -279,44 +296,40 @@ class UTF8WordStarFile(object):
             row = self._mask_row(row)
         return src
 
-    def iter_epoch(self, bsz, evaluation=False):
+    def iter_epoch(self, bsz, evaluation=False, len_=None):
         if evaluation:
-            for len_, data in self.lines.items():
+            for lines_len, data in self.lines.items():
+                if len_ and lines_len != len_:
+                    continue
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
                     tgt = torch.from_numpy(batch).long()
                     src = self._compy_and_mask_target(tgt)
                     yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
         else:
             batch_inds = []
-            for len_, data in self.lines.items():
+            for lines_len, data in self.lines.items():
+                if len_ and lines_len != len_:
+                    continue
                 num_batches = data.shape[0] // bsz
                 if num_batches == 0:
                     continue
                 all_inds = np.random.permutation(data.shape[0])
                 all_inds = all_inds[:(bsz * num_batches)]
-                batch_inds += [(len_,inds) \
+                batch_inds += [(lines_len,inds) \
                                for inds in np.split(all_inds, num_batches)]
             np.random.shuffle(batch_inds)
-            for len_, inds in batch_inds:
-                tgt = torch.from_numpy(self.lines[len_][inds]).long()
+            for lines_len, inds in batch_inds:
+                tgt = torch.from_numpy(self.lines[lines_len][inds]).long()
                 src = self._compy_and_mask_target(tgt)
                 yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
-    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
-        sample_sentence = sample_sentence.encode('utf-8')
-        batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
-        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
-                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
-                            dtype=np.uint8)
-        assert bytes_.shape[1] == batch_len, bytes_.shape
-        # batch_tensor = torch.from_numpy(bytes_).long() 
-        inds = np.random.choice(len(self.lines[batch_len]), bsz)
-        tgt = torch.from_numpy(self.lines[batch_len][inds]).long()
-        tgt[0] = torch.from_numpy(bytes_).long()
-        src = self._compy_and_mask_target(tgt)
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE, len_=None):
+        tgt, _ = super(UTF8WordStarFile, self).sample_batch(
+            bsz, sample_sentence, len_).next()
 
+        src = self._compy_and_mask_target(tgt)
         print("Source:",
-              ''.join(map(chr, src[0].numpy())).replace(chr(WILDCARD), '*'))
+              ''.join(map(chr, src[0].cpu().numpy())).replace(chr(WILDCARD), '*'))
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 
@@ -330,9 +343,11 @@ class UTF8CharStarFile(UTF8File):
         mask = mask & (src != EMPTY)
         return mask
 
-    def iter_epoch(self, bsz, evaluation=False):
+    def iter_epoch(self, bsz, evaluation=False, len_=None):
         if evaluation:
-            for len_, data in self.lines.items():
+            for lines_len, data in self.lines.items():
+                if len_ and lines_len != len_:
+                    continue
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
                     batch = self.maybe_pad(batch)
                     tgt = torch.from_numpy(batch).long()
@@ -342,17 +357,19 @@ class UTF8CharStarFile(UTF8File):
                     yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
         else:
             batch_inds = []
-            for len_, data in self.lines.items():
+            for lines_len, data in self.lines.items():
+                if len_ and lines_len != len_:
+                    continue
                 num_batches = data.shape[0] // bsz
                 if num_batches == 0:
                     continue
                 all_inds = np.random.permutation(data.shape[0])
                 all_inds = all_inds[:(bsz * num_batches)]
-                batch_inds += [(len_,inds) \
+                batch_inds += [(lines_len,inds) \
                                for inds in np.split(all_inds, num_batches)]
             np.random.shuffle(batch_inds)
-            for len_, inds in batch_inds:
-                batch = self.lines[len_][inds]
+            for lines_len, inds in batch_inds:
+                batch = self.lines[lines_len][inds]
                 batch = self.maybe_pad(batch)
                 tgt = torch.from_numpy(batch).long()
                 src = tgt.clone()
@@ -360,25 +377,17 @@ class UTF8CharStarFile(UTF8File):
                 src[mask] = WILDCARD
                 yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
-    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE):
-        sample_sentence = sample_sentence.encode('utf-8')
-        batch_len = int(2 ** np.ceil(np.log2(len(sample_sentence) + 1)))
-        bytes_ = np.asarray([[ord(c) for c in sample_sentence] + [EOS] + \
-                             [EMPTY] * (batch_len - len(sample_sentence) - 1)],
-                            dtype=np.uint8)
-        assert bytes_.shape[1] == batch_len
-        # batch_tensor = torch.from_numpy(bytes_).long() 
-        inds = np.random.choice(len(self.lines[batch_len]), bsz)
-        batch = self.lines[batch_len][inds]
-        batch[0] = bytes_
-        batch = self.maybe_pad(batch)
-        tgt = torch.from_numpy(batch).long()
+    def sample_batch(self, bsz, sample_sentence=SAMPLE_SENTENCE, len_=None):
+        tgt, _ = super(UTF8CharStarFile, self).sample_batch(
+            bsz, sample_sentence, len_).next()
         src = tgt.clone()
         mask = (torch.rand(src.size()) < self.p)
+        if src.is_cuda:
+            mask = mask.cuda()
         mask = mask & (src != EMPTY)
         src[mask] = WILDCARD
         print("Source:",
-              ''.join(map(chr, src[0].numpy())).replace(chr(WILDCARD), '*'))
+              ''.join(map(chr, src[0].cpu().numpy())).replace(chr(WILDCARD), '*'))
         yield (src.cuda(), tgt.cuda()) if self.cuda else (src, tgt)
 
 

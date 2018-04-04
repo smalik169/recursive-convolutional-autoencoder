@@ -61,8 +61,15 @@ def parse_resume_training(args):
         args.__dict__['model_kwargs'] = BackwardCompat.model_kwargs_str(
             args.__dict__['model_kwargs'])
 
+    assert args.resume_training
+
+    curr_logdir = args.resume_training.rstrip('/') + '/'
+    if state['logger'].logdir != curr_logdir:
+        print('WARNING: logdir changed: %s to %s' % (state['logger'].logdir, curr_logdir))
+        state['logger'].logdir = curr_logdir
+
     print(args)
-    print('\nWarning: Ignoring other input arguments!\n')
+    print('\nWARNING: Ignoring other input arguments!\n')
 
     return args, state
 
