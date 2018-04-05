@@ -21,6 +21,7 @@ import data
 import explorer
 import models
 import logger as logger_module
+import helper_functions
 
 parser = argparse.ArgumentParser(description='Byte-level CNN text autoencoder.')
 parser.add_argument('--resume-training', type=str, default='',
@@ -82,6 +83,8 @@ parser.add_argument('--log-weights', action='store_true',
                     help="log weights' histograms")
 parser.add_argument('--log-grads', action='store_true',
                     help="log gradients' histograms")
+parser.add_argument('--loss_scaling', type=str, default=None,
+                    help='loss (learing rate) scaling based on current epoch and sentence length')
 args = parser.parse_args()
 
 
@@ -179,6 +182,11 @@ else:
             path=os.path.join(args.initialize_from_model, 'current_model.pt')),
             strict=False)
 
+if args.loss_scaling is None:
+    loss_scaling = None
+else:
+    loss_scaling = eval(args.loss_scaling)
+
 print(logger.logdir)
 
 ###############################################################################
@@ -201,7 +209,7 @@ try:
         model.train_on(dataset.train.iter_epoch(args.batch_size),
                        optimizer,
                        None if args.lr_step_lambda is None else scheduler,
-                       logger)
+                       logger, loss_scaling(epoch))
 
         if args.bn_lenwise_eval:
             val_loss = model.lengthwise_eval_on(args.batch_size, dataset.valid)

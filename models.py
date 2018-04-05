@@ -271,7 +271,7 @@ class ByteCNNDecoder(nn.Module):
 
         # Set a recurrent layer
         self.recurrent = nn.Sequential(
-            *([Residual(expand_proto, conv_proto, out_relu=True, 
+            *([Residual(expand_proto, conv_proto, out_relu=True,
                         normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization),
                         residual_connection=False)] + \
               residual_list(conv_proto, n//2-1,
@@ -406,8 +406,11 @@ class ByteCNN(nn.Module):
         features = self.encoder(src, r_src)
         return self.decoder(features, r_tgt)
 
-    def train_on(self, batch_iterator, optimizer, scheduler=None, logger=None):
+    def train_on(self, batch_iterator, optimizer, scheduler=None, logger=None,
+                 loss_rescale=None):
         self.train()
+        if loss_rescale is None:
+            loss_rescale = lambda max_len: 1.0
         losses = []
         errs = []
         for batch, (src, tgt) in enumerate(batch_iterator):
@@ -419,7 +422,7 @@ class ByteCNN(nn.Module):
             loss = self.criterion(
                 decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
                 tgt.view(-1))
-            (loss / mask.sum()).backward()
+            (loss_rescale(src.size(1)) * loss / mask.sum()).backward()
             optimizer.step()
 
             _, predictions = decoded.data.max(dim=1)
