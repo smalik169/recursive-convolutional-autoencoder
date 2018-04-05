@@ -61,13 +61,14 @@ class ExpandConv1d(nn.Module):
     def __init__(self, *args, **kwargs):
         super(ExpandConv1d, self).__init__()
         self.conv1d = nn.Conv1d(*args, **kwargs)
+        self.out_channels = self.conv1d.out_channels // 2
 
     def forward(self, x):
         # Output of conv1d: (N,Cout,Lout)
         x = self.conv1d(x)
-        bsz, c, l = x.size()
-        x = x.view(bsz, c // 2, 2, l).transpose(2, 3).contiguous()
-        return x.view(bsz, c // 2, 2 * l).contiguous()
+        bsz, _, l = x.size()
+        x = x.view(bsz, self.out_channels, 2, l).transpose(2, 3).contiguous()
+        return x.view(bsz, self.out_channels, 2 * l).contiguous()
 
 
 class Residual(nn.Module):
@@ -87,10 +88,12 @@ class Residual(nn.Module):
         self.bn2 = norm_protos[normalization](self.num_channels(self.layer2))
 
     def num_channels(self, layer):
-        if type(layer) is ExpandConv1d:
-            return layer.conv1d.out_channels
-        elif type(layer) is nn.Conv1d:
+        if type(layer) in [nn.Conv1d, ExpandConv1d]:
             return layer.out_channels
+        #if type(layer) is ExpandConv1d:
+        #    return layer.conv1d.out_channels
+        #elif type(layer) is nn.Conv1d:
+        #    return layer.out_channels
         elif type(layer) is nn.Linear:
             return layer.weight.size(0)
         else:
@@ -355,7 +358,7 @@ class ByteCNN(nn.Module):
                 use_external_batch_norm=use_external_batch_norm, external_batch_max_r=external_batch_max_r)
 
         self.log_softmax = nn.LogSoftmax()
-        self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index)
+        self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index, size_average=False)
         self.eos = eos
         self.unroll_r = None
         if unroll_r:
@@ -412,19 +415,21 @@ class ByteCNN(nn.Module):
             src = Variable(src)
             tgt = Variable(tgt)
             decoded = self._encode_decode(src, tgt)
+            mask = (tgt.data != self.criterion.ignore_index)
             loss = self.criterion(
                 decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
                 tgt.view(-1))
-            loss.backward()
+            (loss / mask.sum()).backward()
             optimizer.step()
 
             _, predictions = decoded.data.max(dim=1)
-            mask = (tgt.data != self.criterion.ignore_index)
-            err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() / mask.sum()
+            err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() #/ mask.sum()
             losses.append(loss.data[0])
             errs.append(err_rate)
-            logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
-                             named_params=self.named_parameters)
+            #logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
+            #                 named_params=self.named_parameters)
+            logger.train_log(batch, {'loss': loss.data[0], 'err': err_rate,},
+                             named_params=self.named_parameters, num_samples=mask.sum())
 
             if scheduler is not None:
                 scheduler.step()
@@ -456,8 +461,9 @@ class ByteCNN(nn.Module):
             errs += (predictions[mask] != tgt.data[mask]).sum()
             samples += mask.sum()
             batch_cnt += 1
-        return {'loss': total_loss.data[0]/batch_cnt,
-                'acc': 100 - 100. * errs / samples,}
+        return {'loss': total_loss.data[0] / samples, #batch_cnt,
+                'acc': 100 - 100. * errs / samples,
+                'err': 100. * errs / samples}
 
     def lengthwise_eval_on(self, bsz, dataset, num_batches_for_stats=100):
 
