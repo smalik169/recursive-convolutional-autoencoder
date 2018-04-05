@@ -59,6 +59,8 @@ parser.add_argument('--epochs', type=int, default=40,
                     help='upper epoch limit')
 parser.add_argument('--batch-size', type=int, default=128, metavar='N',
                     help='batch size')
+parser.add_argument('--tokens-per-batch', type=int, default=None, metavar='N',
+                    help='num of tokens in single batch (num sents * bsz for max sent len)')
 parser.add_argument('--eval-batch-size', type=int, default=10, metavar='N',
                     help='batch size')
 parser.add_argument('--optimizer', default='sgd',
@@ -125,7 +127,7 @@ model_class = getattr(models, args.model)
 # Set default kwargs for the model
 model_kwargs = {"ignore_index": data.EMPTY}
 if model_class is models.VAEByteCNN:
-    num_batches = dataset.train.get_num_batches(args.batch_size)
+    num_batches = dataset.train.get_num_batches(args.batch_size, args.tokens_per_batch)
     model_kwargs.update(
             {'kl_increment_start': 4 * num_batches,
              'kl_increment': 0.25 / num_batches})
@@ -168,7 +170,7 @@ if args.resume_training != '':
 else:
     logger = logger_module.Logger(
         optimizer.param_groups[0]['lr'], args.log_interval,
-        dataset.train.get_num_batches(args.batch_size), logdir=args.logdir,
+        dataset.train.get_num_batches(args.batch_size, args.tokens_per_batch), logdir=args.logdir,
         log_weights=args.log_weights, log_grads=args.log_grads)
     logger.save_model_info(dict(model=(args.model, model_kwargs)))
     first_epoch = 1
@@ -198,16 +200,16 @@ try:
     for epoch in range(first_epoch, args.epochs+1):
         logger.mark_epoch_start(epoch)
 
-        model.train_on(dataset.train.iter_epoch(args.batch_size),
+        model.train_on(dataset.train.iter_epoch(bsz=args.batch_size, tokens_per_batch=args.tokens_per_batch),
                        optimizer,
                        None if args.lr_step_lambda is None else scheduler,
                        logger)
 
         if args.bn_lenwise_eval:
-            val_loss = model.lengthwise_eval_on(args.batch_size, dataset.valid)
+            val_loss = model.lengthwise_eval_on(dataset.valid, bsz=args.batch_size, tokens_per_batch=args.tokens_per_batch)
         else:
             val_loss = model.eval_on(
-                dataset.valid.iter_epoch(args.batch_size, evaluation=True),
+                dataset.valid.iter_epoch(bsz=args.batch_size, tokens_per_batch=args.tokens_per_batch, evaluation=True),
                 switch_to_evalmode=model.encoder.use_external_batch_norm)
 
         try_bsz = (1 if model.encoder.normalization == 'instance' else args.batch_size)

@@ -93,6 +93,7 @@ class RegularizedFile(object):
             yield b
 
     def get_num_batches(self, *args, **kwargs):
+        raise NotImplementedError  # Add support for tokens_per_batch
         return self.utf8file.get_num_batches(*args, **kwargs) + self.random_file.get_num_batches(*args, **kwargs)
 
 
@@ -117,8 +118,9 @@ class RandomFile(object):
     def sentence_lengths(self):
         raise NotImplementedError
 
-    def get_num_batches(self, bsz):
-        return self.num_samples // bsz
+    def get_num_batches(self, bsz=None, tokens_per_batch=None):
+        # num of batches varies when tokens_per_batch != None so keep it fixed
+        return 30000
 
     def maybe_pad(self, batch):
         if self.fixed_len:
@@ -127,7 +129,7 @@ class RandomFile(object):
         else:
             return batch
 
-    def iter_epoch(self, bsz, evaluation=False, len_=None):
+    def iter_epoch(self, bsz=None, tokens_per_batch=None, evaluation=False, len_=None):
         is_power_of_2 = lambda x: 2**int(np.log2(x)) == x
         assert is_power_of_2(self.min_len)
         assert self.max_len is np.inf or is_power_of_2(self.max_len)
@@ -141,8 +143,9 @@ class RandomFile(object):
             log_max_len = int(np.log2(self.max_len))
             lengths = np.logspace(log_min_len, log_max_len, log_max_len-1, base=2)
 
-        for _ in xrange(self.get_num_batches(bsz)):
+        for _ in xrange(self.get_num_batches(bsz, tokens_per_batch)):
             l = int(self.rng.choice(lengths))
+            bsz = tokens_per_batch // l if tokens_per_batch else bsz
             batch = self.rng.randint(
                 self.lowest_byte, self.highest_byte+1, (bsz, l), dtype=np.uint8)
             batch_tensor = torch.from_numpy(batch).long()
@@ -197,8 +200,14 @@ class UTF8File(object):
     def sentence_lengths(self):
         return sorted([k for k in self.lines.keys() if k > 0])
 
-    def get_num_batches(self, bsz):
-        return sum(arr.shape[0] // bsz for arr in self.lines.values())
+    def get_num_batches(self, bsz=None, tokens_per_batch=None):
+        assert bsz is not None or tokens_per_batch is not None
+
+        ret = 0
+        for lines_len, data in self.lines.items():
+            bsz = tokens_per_batch // lines_len if tokens_per_batch else bsz
+            ret += data.shape[0] // bsz
+        return ret
 
     def maybe_pad(self, batch):
         if self.fixed_len:
@@ -207,11 +216,14 @@ class UTF8File(object):
         else:
             return batch
 
-    def iter_epoch(self, bsz, evaluation=False, len_=None):
+    def iter_epoch(self, bsz=None, tokens_per_batch=None, evaluation=False, len_=None):
+        assert bsz is not None or tokens_per_batch is not None
+
         if evaluation:
             for lines_len, data in self.lines.items():
                 if len_ and lines_len != len_:
                     continue
+                bsz = tokens_per_batch // lines_len if tokens_per_batch else bsz
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
                     batch = self.maybe_pad(batch)
                     batch_tensor = torch.from_numpy(batch).long()
@@ -223,6 +235,7 @@ class UTF8File(object):
             for lines_len, data in self.lines.items():
                 if len_ and lines_len != len_:
                     continue
+                bsz = tokens_per_batch // lines_len if tokens_per_batch else bsz
                 num_batches = data.shape[0] // bsz
                 if num_batches == 0:
                     continue
@@ -268,9 +281,6 @@ class UTF8WordStarFile(UTF8File):
         self.p = p
         self.max_w_len = max_w_len
 
-    def get_num_batches(self, bsz):
-        return sum(arr.shape[0] // bsz for arr in self.lines.values())
-
     def _mask_row(self, row):
         def is_num_alpha(num):
             return ord('A') <= num <= ord('z')
@@ -296,11 +306,14 @@ class UTF8WordStarFile(UTF8File):
             row = self._mask_row(row)
         return src
 
-    def iter_epoch(self, bsz, evaluation=False, len_=None):
+    def iter_epoch(self, bsz=None, tokens_per_batch=None, evaluation=False, len_=None):
+        assert bsz is not None or tokens_per_batch is not None
+
         if evaluation:
             for lines_len, data in self.lines.items():
                 if len_ and lines_len != len_:
                     continue
+                bsz = tokens_per_batch // lines_len if tokens_per_batch else bsz
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
                     tgt = torch.from_numpy(batch).long()
                     src = self._compy_and_mask_target(tgt)
@@ -310,6 +323,7 @@ class UTF8WordStarFile(UTF8File):
             for lines_len, data in self.lines.items():
                 if len_ and lines_len != len_:
                     continue
+                bsz = tokens_per_batch // lines_len if tokens_per_batch else bsz
                 num_batches = data.shape[0] // bsz
                 if num_batches == 0:
                     continue
@@ -343,11 +357,14 @@ class UTF8CharStarFile(UTF8File):
         mask = mask & (src != EMPTY)
         return mask
 
-    def iter_epoch(self, bsz, evaluation=False, len_=None):
+    def iter_epoch(self, bsz=None, evaluation=False, len_=None):
+        assert bsz is not None or tokens_per_batch is not None
+
         if evaluation:
             for lines_len, data in self.lines.items():
                 if len_ and lines_len != len_:
                     continue
+                bsz = tokens_per_batch // lines_len if tokens_per_batch else bsz
                 for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
                     batch = self.maybe_pad(batch)
                     tgt = torch.from_numpy(batch).long()
@@ -360,6 +377,7 @@ class UTF8CharStarFile(UTF8File):
             for lines_len, data in self.lines.items():
                 if len_ and lines_len != len_:
                     continue
+                bsz = tokens_per_batch // lines_len if tokens_per_batch else bsz
                 num_batches = data.shape[0] // bsz
                 if num_batches == 0:
                     continue

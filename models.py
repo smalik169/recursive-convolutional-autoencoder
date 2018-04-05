@@ -459,7 +459,8 @@ class ByteCNN(nn.Module):
         return {'loss': total_loss.data[0]/batch_cnt,
                 'acc': 100 - 100. * errs / samples,}
 
-    def lengthwise_eval_on(self, bsz, dataset, num_batches_for_stats=100):
+    def lengthwise_eval_on(self, dataset, bsz=None, tokens_per_batch=None, num_batches_for_stats=100):
+        assert bsz is not None or tokens_per_batch is not None
 
         def double_running(bn): bn.running_mean *= 2 ; bn.running_var *= 2
         def normalize_running(bn, i): bn.running_mean /= (1.0*i) ; bn.running_var /= (1.0*i)
@@ -482,7 +483,8 @@ class ByteCNN(nn.Module):
             reset_batchnorms(self, momentum=0.5, zero_var=True)
 
             # Note that evaluation= controls shuffling
-            for i, (src, tgt) in enumerate(dataset.iter_epoch(bsz, evaluation=True, len_=L)):
+            for i, (src, tgt) in enumerate(dataset.iter_epoch(
+                    bsz=bsz, tokens_per_batch=tokens_per_batch, evaluation=True, len_=L)):
                 src = Variable(src, volatile=True)
                 tgt = Variable(tgt, volatile=True)
                 self._encode_decode(src, tgt)
@@ -491,7 +493,8 @@ class ByteCNN(nn.Module):
                     break
             apply_to_batchnorm(self, lambda bn: normalize_running(bn, (i+1)))
             self.eval()
-            for (src, tgt) in dataset.iter_epoch(bsz, evaluation=True, len_=L):
+            for (src, tgt) in dataset.iter_epoch(
+                    bsz=bsz, tokens_per_batch=tokens_per_batch, evaluation=True, len_=L):
                 src = Variable(src, volatile=True)
                 tgt = Variable(tgt, volatile=True)
                 decoded = self._encode_decode(src, tgt)
