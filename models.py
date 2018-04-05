@@ -465,8 +465,7 @@ class ByteCNN(nn.Module):
             samples += mask.sum()
             batch_cnt += 1
         return {'loss': total_loss.data[0] / samples, #batch_cnt,
-                'acc': 100 - 100. * errs / samples,
-                'err': 100. * errs / samples}
+                'acc': 100 - 100. * errs / samples}
 
     def lengthwise_eval_on(self, bsz, dataset, num_batches_for_stats=100):
 
@@ -517,7 +516,7 @@ class ByteCNN(nn.Module):
                 this_samples += mask.sum()
             lengthwise_acc[L] = str(int(100 - 100. * this_errs / this_samples)) + '%'
         print(sorted(lengthwise_acc.items()))
-        return {'loss': total_loss.data[0]/batch_cnt,
+        return {'loss': total_loss.data[0]/samples,
                 'acc': 100 - 100. * errs / samples,}
 
     def try_on(self, batch_iterator, switch_to_evalmode=True, r_tgt=None,

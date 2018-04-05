@@ -104,11 +104,12 @@ class RegularizedFile(object):
 
 class RandomFile(object):
     def __init__(self, path, cuda, rng=None, fixed_len=None, p=None,
-                 use_cache=False, max_len=64, lowest_byte=32, highest_byte=122):
+                 use_cache=False, max_len=64, lowest_byte=32, highest_byte=122,
+                 random_lines_per_epoch=-1):
         if 'valid' in path or 'test' in path:
             self.num_samples = 10000
         elif 'train' in path:
-            self.num_samples = 2 * 10**6
+            self.num_samples = 2 * 10**6 if random_lines_per_epoch < 0 else random_lines_per_epoch
         else:
             raise ValueError
         del use_cache
@@ -187,7 +188,8 @@ class RandomFile(object):
 
 class UTF8File(object):
     def __init__(self, path, cuda, rng=None, fixed_len=None, p=None,
-                 min_len=4, max_len=np.inf, use_cache=True, random_lines=-1):
+                 min_len=4, max_len=np.inf, use_cache=True, random_lines=-1,
+                 random_lines_per_epoch=-1):
         self.cuda = cuda
         self.rng = np.random.RandomState(rng)
         if max_len is not np.inf and fixed_len is not None:
@@ -201,12 +203,16 @@ class UTF8File(object):
             self.lines = Cache.byte_file_to_lines(
                     path, min_len=min_len, max_len=self.max_len,
                     random_lines=random_lines)
+        self.random_lines_per_epoch = random_lines_per_epoch
 
     def sentence_lengths(self):
         return sorted([k for k in self.lines.keys() if k > 0])
 
     def get_num_batches(self, bsz):
-        return sum(arr.shape[0] // bsz for arr in self.lines.values())
+        if self.random_lines_per_epoch > 0:
+            return self.random_lines_per_epoch // bsz
+        else:
+            return sum(arr.shape[0] // bsz for arr in self.lines.values())
 
     def get_num_sentences(self):
         return sum(arr.shape[0] for arr in self.lines.values())
@@ -242,6 +248,9 @@ class UTF8File(object):
                 batch_inds += [(lines_len,inds) \
                                for inds in np.split(all_inds, num_batches)]
             np.random.shuffle(batch_inds)
+            if self.random_lines_per_epoch > 0:
+                batch_inds = batch_inds[:(self.random_lines_per_epoch // bsz)]
+
             for lines_len, inds in batch_inds:
                 batch = self.lines[lines_len][inds]
                 batch = self.maybe_pad(batch)
@@ -280,7 +289,10 @@ class UTF8WordStarFile(UTF8File):
         self.max_w_len = max_w_len
 
     def get_num_batches(self, bsz):
-        return sum(arr.shape[0] // bsz for arr in self.lines.values())
+        if self.random_lines_per_epoch > 0:
+            return self.random_lines_per_epoch // bsz
+        else:
+            return sum(arr.shape[0] // bsz for arr in self.lines.values())
 
     def _mask_row(self, row):
         def is_num_alpha(num):
@@ -329,6 +341,9 @@ class UTF8WordStarFile(UTF8File):
                 batch_inds += [(lines_len,inds) \
                                for inds in np.split(all_inds, num_batches)]
             np.random.shuffle(batch_inds)
+            if self.random_lines_per_epoch > 0:
+                batch_inds = batch_inds[:(self.random_lines_per_epoch // bsz)]
+
             for lines_len, inds in batch_inds:
                 tgt = torch.from_numpy(self.lines[lines_len][inds]).long()
                 src = self._compy_and_mask_target(tgt)
@@ -379,6 +394,9 @@ class UTF8CharStarFile(UTF8File):
                 batch_inds += [(lines_len,inds) \
                                for inds in np.split(all_inds, num_batches)]
             np.random.shuffle(batch_inds)
+            if self.random_lines_per_epoch > 0:
+                batch_inds = batch_inds[:(self.random_lines_per_epoch // bsz)]
+
             for lines_len, inds in batch_inds:
                 batch = self.lines[lines_len][inds]
                 batch = self.maybe_pad(batch)
@@ -414,14 +432,16 @@ class UTF8CharVarStarFile(UTF8CharStarFile):
 class UTF8Corpus(object):
     def __init__(self, path, cuda, file_class=UTF8File, rng=None,
                  fixed_len=None, min_len=4, max_len=np.inf, subset_kwargs={},
-                 use_cache=True, sets=dict(train=True, valid=True, test=True)):
+                 use_cache=True, sets=dict(train=True, valid=True, test=True),
+                 random_lines_per_epoch=-1):
         if use_cache:
             Cache.build(path + 'train.txt')
             Cache.build(path + 'valid.txt')
             Cache.build(path + 'test.txt')
 
         subset_kwargs.update(dict(rng=rng, fixed_len=fixed_len,
-            min_len=min_len, max_len=max_len, use_cache=use_cache))
+            min_len=min_len, max_len=max_len, use_cache=use_cache,
+            random_lines_per_epoch=random_lines_per_epoch))
 
         self.train = file_class(path + 'train.txt', cuda, **subset_kwargs) if sets['train'] else None
         self.valid = file_class(path + 'valid.txt', cuda, **subset_kwargs) if sets['valid'] else None

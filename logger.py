@@ -326,6 +326,9 @@ class Logger(object):
                        ) * 1000 / self.log_interval
             cur_loss = {k: v / self.num_samples #self.log_interval
                         for k, v in self.total_losses.items()}
+            if 'err' in cur_loss:
+                cur_loss['acc'] = 100. - cur_loss['err']
+                del cur_loss['err']
             # cur_loss['pplx'] = np.exp(cur_loss['nll_per_w'])
             loss_str = ' | '.join(
                 [' {} {:5.2f}'.format(k, cur_loss[k]) \
