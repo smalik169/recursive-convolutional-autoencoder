@@ -319,7 +319,7 @@ class Logger(object):
         else:
             for k, v in batch_losses.iteritems():
                 self.total_losses[k] += v
-                self.num_samples += num_samples
+            self.num_samples += num_samples
 
         if batch % self.log_interval == 0 and batch > 0:
             elapsed = (time.time() - self.minibatch_start_time
