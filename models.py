@@ -62,6 +62,7 @@ class ExpandConv1d(nn.Module):
         super(ExpandConv1d, self).__init__()
         self.conv1d = nn.Conv1d(*args, **kwargs)
         self.out_channels = self.conv1d.out_channels // 2
+        print("USING EXPAND RESIDUAL")
 
     def forward(self, x):
         # Output of conv1d: (N,Cout,Lout)
@@ -69,6 +70,76 @@ class ExpandConv1d(nn.Module):
         bsz, _, l = x.size()
         x = x.view(bsz, self.out_channels, 2, l).transpose(2, 3).contiguous()
         return x.view(bsz, self.out_channels, 2 * l).contiguous()
+
+
+class JustExpand(nn.Module):
+    def __init__(self, out_channels):
+        super(JustExpand, self).__init__()
+        self.out_channels = out_channels
+
+    def forward(self, x):
+        bsz, _, l = x.size()
+        x = x.view(bsz, self.out_channels, 2, l).transpose(2, 3).contiguous()
+        return x.view(bsz, self.out_channels, 2 * l).contiguous()
+
+
+class ExpandResidual(nn.Module):
+    def __init__(self, layer_proto, layer2_proto=None, out_relu=True,
+                 normalization='batch', residual_connection=True,
+                 dropout=0.0):
+        super(ExpandResidual, self).__init__()
+        self.layer1 = layer_proto()
+        self.relu = nn.ReLU()
+        self.layer2 = layer2_proto() if layer2_proto else layer_proto()
+        self.out_relu = out_relu
+        self.normalization = normalization
+        self.residual_connection = residual_connection
+        self.dropout = nn.Dropout(p=dropout)
+        self.expand = JustExpand(out_channels=self.layer1.out_channels // 2)
+
+        # TODO Keep old 'bn' name for backward compat when loading params
+        self.bn1 = norm_protos[normalization](self.num_channels(self.layer1))
+        self.bn2 = norm_protos[normalization](self.num_channels(self.layer2))
+
+    def num_channels(self, layer):
+        if type(layer) in [nn.Conv1d, ExpandConv1d]:
+            return layer.out_channels
+        #if type(layer) is ExpandConv1d:
+        #    return layer.conv1d.out_channels
+        #elif type(layer) is nn.Conv1d:
+        #    return layer.out_channels
+        elif type(layer) is nn.Linear:
+            return layer.weight.size(0)
+        else:
+            raise ValueError('Unsupported layer type.')
+
+    def forward(self, x, norm1=None, norm2=None):
+        x = self.dropout(x)
+        residual = x
+        out = self.layer1(x)
+        out = self.expand(out)
+
+        if self.residual_connection:
+            residual = self.expand(torch.cat([residual,residual],dim=1))
+
+        if norm1 is not None:
+            out = norm1(out)
+        else:
+            out = self.bn1(out)
+
+        out = self.relu(out)
+        out = self.layer2(out)
+
+        if norm2 is not None:
+            out = norm2(out)
+        else:
+            out = self.bn2(out)
+
+        if self.residual_connection:
+            out += residual
+        if self.out_relu:
+            out = self.relu(out)
+        return out
 
 
 class Residual(nn.Module):
@@ -230,7 +301,8 @@ class ByteCNNDecoder(nn.Module):
     def __init__(self, n, emsize, vocab_size, normalization,
                  use_linear_layers=True, compress_channels=None,
                  output_embeddings_init=None,
-                 use_external_batch_norm=False, external_batch_max_r=None):
+                 use_external_batch_norm=False, external_batch_max_r=None,
+                 output_emb_tie_weights=True, expand_residual=False):
         super(ByteCNNDecoder, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -270,12 +342,20 @@ class ByteCNNDecoder(nn.Module):
             self.prefix = None
 
         # Set a recurrent layer
-        self.recurrent = nn.Sequential(
-            *([Residual(expand_proto, conv_proto, out_relu=True, 
-                        normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization),
-                        residual_connection=False)] + \
-              residual_list(conv_proto, n//2-1,
-                            normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization))))
+        if expand_residual:
+            self.recurrent = nn.Sequential(
+                *([ExpandResidual(lambda: nn.Conv1d(emsize, emsize*2, **conv_kwargs), conv_proto, out_relu=True, 
+                            normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization),
+                            )] + \
+                  residual_list(conv_proto, n//2-1,
+                                normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization))))
+        else:
+            self.recurrent = nn.Sequential(
+                *([Residual(expand_proto, conv_proto, out_relu=True, 
+                            normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization),
+                            residual_connection=False)] + \
+                  residual_list(conv_proto, n//2-1,
+                                normalization=(normalization == 'batch' and None if use_external_batch_norm else normalization))))
 
         self.postfix = nn.Sequential(
                 *(residual_list(conv_proto, n//2,
@@ -293,7 +373,8 @@ class ByteCNNDecoder(nn.Module):
         self.output_embedding = None
         if output_embeddings_init:
             self.output_embedding = nn.Linear(emsize, vocab_size)
-            self.output_embedding.weight = output_embeddings_init.weight
+            if output_emb_tie_weights:
+                self.output_embedding.weight = output_embeddings_init.weight
 
     def forward(self, x, r):
         if self.compress_channels:
@@ -325,6 +406,7 @@ class ByteCNNDecoder(nn.Module):
         if self.output_embedding:
             x = self.output_embedding(x.transpose(1,2).contiguous()). \
                      transpose(1,2).contiguous()
+
         return x
 
 
@@ -335,7 +417,10 @@ class ByteCNN(nn.Module):
             ignore_index=-1, eos=0,
             use_linear_layers=True, compress_channels=None,
             use_output_embeddings=False, dropout=0.0, unroll_r=None,
-            use_external_batch_norm=False, external_batch_max_r=None):
+            use_external_batch_norm=False, external_batch_max_r=None,
+            divide_recursive_grads=False, 
+            output_emb_tie_weights=True,
+            expand_residual=False):
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -355,7 +440,9 @@ class ByteCNN(nn.Module):
                 use_linear_layers=use_linear_layers,
                 compress_channels=compress_channels,
                 output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None),
-                use_external_batch_norm=use_external_batch_norm, external_batch_max_r=external_batch_max_r)
+                use_external_batch_norm=use_external_batch_norm, external_batch_max_r=external_batch_max_r,
+                output_emb_tie_weights=output_emb_tie_weights,
+                expand_residual=expand_residual)
 
         self.log_softmax = nn.LogSoftmax()
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index, size_average=False)
@@ -363,6 +450,7 @@ class ByteCNN(nn.Module):
         self.unroll_r = None
         if unroll_r:
             self.unroll(unroll_r)
+        self.divide_recursive_grads = divide_recursive_grads
 
     def forward(self, x):
         x = self.encoder(x, r)
@@ -412,14 +500,24 @@ class ByteCNN(nn.Module):
         errs = []
         for batch, (src, tgt) in enumerate(batch_iterator):
             self.zero_grad()
+
             src = Variable(src)
             tgt = Variable(tgt)
+
             decoded = self._encode_decode(src, tgt)
             mask = (tgt.data != self.criterion.ignore_index)
             loss = self.criterion(
                 decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
                 tgt.view(-1))
             (loss / mask.sum()).backward()
+
+            if self.divide_recursive_grads:
+                r = 1.0 * self.num_recurrences(src)
+                for p in self.encoder.recurrent.parameters():
+                    p.grad /= r
+                for p in self.decoder.recurrent.parameters():
+                    p.grad /= r
+
             optimizer.step()
 
             _, predictions = decoded.data.max(dim=1)
@@ -465,6 +563,7 @@ class ByteCNN(nn.Module):
                 'acc': 100 - 100. * errs / samples}
 
     def lengthwise_eval_on(self, bsz, dataset, num_batches_for_stats=100):
+        assert bsz is not None
 
         def double_running(bn): bn.running_mean *= 2 ; bn.running_var *= 2
         def normalize_running(bn, i): bn.running_mean /= (1.0*i) ; bn.running_var /= (1.0*i)
@@ -487,7 +586,7 @@ class ByteCNN(nn.Module):
             reset_batchnorms(self, momentum=0.5, zero_var=True)
 
             # Note that evaluation= controls shuffling
-            for i, (src, tgt) in enumerate(dataset.iter_epoch(bsz, evaluation=True, len_=L)):
+            for i, (src, tgt) in enumerate(dataset.iter_epoch(bsz=bsz, evaluation=True, len_=L)):
                 src = Variable(src, volatile=True)
                 tgt = Variable(tgt, volatile=True)
                 self._encode_decode(src, tgt)
@@ -496,7 +595,7 @@ class ByteCNN(nn.Module):
                     break
             apply_to_batchnorm(self, lambda bn: normalize_running(bn, (i+1)))
             self.eval()
-            for (src, tgt) in dataset.iter_epoch(bsz, evaluation=True, len_=L):
+            for (src, tgt) in dataset.iter_epoch(bsz=bsz, evaluation=True, len_=L):
                 src = Variable(src, volatile=True)
                 tgt = Variable(tgt, volatile=True)
                 decoded = self._encode_decode(src, tgt)
