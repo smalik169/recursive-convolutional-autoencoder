@@ -333,9 +333,10 @@ class Logger(object):
             loss_str = ' | '.join(
                 [' {} {:5.2f}'.format(k, cur_loss[k]) \
                  for k in sorted(cur_loss.keys())])
-            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:02.5f} | '
+            print('| epoch {:3d} | logdir {} | {:5d}/{:5d} batches | lr {:02.5f} | '
                   'ms/batch {:5.2f} | {}'.format(
-                    self.epoch, batch, self.num_batches, self.lr,
+                    self.epoch, self.logdir.replace('/', '')[-16:], 
+                    batch, self.num_batches, self.lr,
                     elapsed, loss_str))
 
             cur_loss["ms/batch"] = elapsed

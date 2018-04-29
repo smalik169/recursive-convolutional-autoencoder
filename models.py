@@ -117,15 +117,16 @@ class ExpandResidual(nn.Module):
         x = self.dropout(x)
         residual = x
         out = self.layer1(x)
-        out = self.expand(out)
-
-        if self.residual_connection:
-            residual = self.expand(torch.cat([residual,residual],dim=1))
 
         if norm1 is not None:
             out = norm1(out)
         else:
             out = self.bn1(out)
+
+        out = self.expand(out)
+
+        if self.residual_connection:
+            residual = self.expand(torch.cat([residual,residual],dim=1))
 
         out = self.relu(out)
         out = self.layer2(out)
@@ -259,7 +260,7 @@ class ByteCNNEncoder(nn.Module):
             self.postfix = nn.Sequential(*(postfix_layers))
         elif self.use_linear_layers:
             postfix_layers = residual_list(
-                linear_proto, n//2-1, normalization,
+                linear_proto, n//2, normalization,
                 last_relu=False, dropout=dropout)
             self.postfix = nn.Sequential(*postfix_layers)
         else:
@@ -420,7 +421,7 @@ class ByteCNN(nn.Module):
             use_external_batch_norm=False, external_batch_max_r=None,
             divide_recursive_grads=False, 
             output_emb_tie_weights=True,
-            expand_residual=False):
+            expand_residual=False, backprop_every=1):
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -451,6 +452,7 @@ class ByteCNN(nn.Module):
         if unroll_r:
             self.unroll(unroll_r)
         self.divide_recursive_grads = divide_recursive_grads
+        self.backprop_every = backprop_every
 
     def forward(self, x):
         x = self.encoder(x, r)
@@ -499,7 +501,8 @@ class ByteCNN(nn.Module):
         losses = []
         errs = []
         for batch, (src, tgt) in enumerate(batch_iterator):
-            self.zero_grad()
+            if batch % self.backprop_every == 0:
+                self.zero_grad()
 
             src = Variable(src)
             tgt = Variable(tgt)
@@ -511,14 +514,15 @@ class ByteCNN(nn.Module):
                 tgt.view(-1))
             (loss / mask.sum()).backward()
 
-            if self.divide_recursive_grads:
-                r = 1.0 * self.num_recurrences(src)
-                for p in self.encoder.recurrent.parameters():
-                    p.grad /= r
-                for p in self.decoder.recurrent.parameters():
-                    p.grad /= r
-
-            optimizer.step()
+            if batch % self.backprop_every == (self.backprop_every - 1):
+                if self.divide_recursive_grads:
+                    r = 1.0 * self.num_recurrences(src)
+                    for p in self.encoder.recurrent.parameters():
+                        p.grad /= (r - 1)
+                    for p in self.decoder.recurrent.parameters():
+                        p.grad /= (r - 1)
+                
+                optimizer.step()
 
             _, predictions = decoded.data.max(dim=1)
             err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() #/ mask.sum()

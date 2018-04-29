@@ -205,11 +205,11 @@ try:
 
         if args.bn_lenwise_eval:
             val_loss = model.lengthwise_eval_on(args.batch_size, dataset.valid)
-            sanity_train_loss = model.lengthwise_eval_on(args.batch_size, dataset.sanity)
+            # sanity_train_loss = model.lengthwise_eval_on(args.batch_size, dataset.sanity)
         else:
-            sanity_train_loss = model.eval_on(
-                    dataset.sanity.iter_epoch(args.batch_size, evaluation=True),
-                    switch_to_evalmode=model.encoder.use_external_batch_norm)
+            # sanity_train_loss = model.eval_on(
+            #         dataset.sanity.iter_epoch(args.batch_size, evaluation=True),
+            #         switch_to_evalmode=model.encoder.use_external_batch_norm)
             val_loss = model.eval_on(
                     dataset.valid.iter_epoch(args.batch_size, evaluation=True),
                     switch_to_evalmode=model.encoder.use_external_batch_norm)
@@ -219,7 +219,7 @@ try:
             try_bsz, sample_sentence=data.SAMPLE_SENTENCE)
         print(repr(model.try_on(
             try_batch, switch_to_evalmode=model.encoder.use_external_batch_norm)[0]))
-        logger.valid_log(sanity_train_loss, mode='sanity')
+        # logger.valid_log(sanity_train_loss, mode='sanity')
         logger.valid_log(val_loss, mode='valid')
 
         # Save the model if the validation loss is the best we've seen so far.
