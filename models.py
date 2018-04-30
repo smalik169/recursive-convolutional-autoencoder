@@ -421,7 +421,7 @@ class ByteCNN(nn.Module):
             use_external_batch_norm=False, external_batch_max_r=None,
             divide_recursive_grads=False, 
             output_emb_tie_weights=True,
-            expand_residual=False, backprop_every=1):
+            expand_residual=False, backprop_every=1, sub_batchsize=None):
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -453,6 +453,7 @@ class ByteCNN(nn.Module):
             self.unroll(unroll_r)
         self.divide_recursive_grads = divide_recursive_grads
         self.backprop_every = backprop_every
+        self.sub_batchsize = sub_batchsize
 
     def forward(self, x):
         x = self.encoder(x, r)
@@ -500,42 +501,89 @@ class ByteCNN(nn.Module):
         self.train()
         losses = []
         errs = []
-        for batch, (src, tgt) in enumerate(batch_iterator):
-            if batch % self.backprop_every == 0:
-                self.zero_grad()
+        for batch, batch_tuple in enumerate(batch_iterator):
+            src, tgt, lengths = (batch_tuple + (None,))[:3]
 
-            src = Variable(src)
-            tgt = Variable(tgt)
+            if self.sub_batchsize:
+                assert lengths is not None
 
-            decoded = self._encode_decode(src, tgt)
-            mask = (tgt.data != self.criterion.ignore_index)
-            loss = self.criterion(
-                decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
-                tgt.view(-1))
-            (loss / mask.sum()).backward()
+                err_rate = 0
+                loss = 0.0
+                num_samples = 0
 
-            if batch % self.backprop_every == (self.backprop_every - 1):
-                if self.divide_recursive_grads:
-                    r = 1.0 * self.num_recurrences(src)
-                    for p in self.encoder.recurrent.parameters():
-                        p.grad /= (r - 1)
-                    for p in self.decoder.recurrent.parameters():
-                        p.grad /= (r - 1)
-                
-                optimizer.step()
+                for i in range(0, src_.size(0), self.sub_batchsize):
+                    src_ = Variable(src[i:(i+self.sub_batchsize),:lengths[i]])
+                    tgt_ = Variable(tgt[i:(i+self.sub_batchsize),:lengths[i]])
 
-            _, predictions = decoded.data.max(dim=1)
-            err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() #/ mask.sum()
-            losses.append(loss.data[0])
-            errs.append(err_rate)
-            #logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
-            #                 named_params=self.named_parameters)
-            logger.train_log(batch, {'loss': loss.data[0], 'err': err_rate,},
-                             named_params=self.named_parameters, num_samples=mask.sum())
+                    if i % self.backprop_every == 0:
+                        self.zero_grad()
+                        sub_loss = 0.0
+                        sub_mask_sum = 0
 
-            if scheduler is not None:
-                scheduler.step()
-                logger.lr = optimizer.param_groups[0]['lr']
+                    decoded = self._encode_decode(src_, tgt_)
+                    mask = (tgt_.data != self.criterion.ignore_index)
+                    sub_mask_sum += mask.sum()
+                    sub_loss += self.criterion(
+                        decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
+                        tgt_.view(-1))
+                    loss += sub_loss.data[0]
+
+                    if batch % self.backprop_every == (self.backprop_every - 1):
+                        (sub_loss / sub_mask_sum).backward()
+                        if self.divide_recursive_grads:
+                            r = 1.0 * self.num_recurrences(src_)
+                            for p in self.encoder.recurrent.parameters():
+                                p.grad /= (r - 1)
+                            for p in self.decoder.recurrent.parameters():
+                                p.grad /= (r - 1)
+                        optimizer.step()
+
+                    _, predictions = decoded.data.max(dim=1)
+                    err_rate += 100. * (predictions[mask] != tgt_.data[mask]).sum() #/ mask.sum()
+                    num_samples += mask.sum()
+
+                losses.append(loss)
+                errs.append(err_rate)
+                #logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
+                #                 named_params=self.named_parameters)
+                logger.train_log(batch, {'loss': loss, 'err': err_rate,},
+                                 named_params=self.named_parameters, num_samples=num_samples)
+            else:
+                if batch % self.backprop_every == 0:
+                    self.zero_grad()
+
+                src = Variable(src)
+                tgt = Variable(tgt)
+
+                decoded = self._encode_decode(src, tgt)
+                mask = (tgt.data != self.criterion.ignore_index)
+                loss = self.criterion(
+                    decoded.transpose(1, 2).contiguous().view(-1, decoded.size(1)),
+                    tgt.view(-1))
+                (loss / mask.sum()).backward()
+
+                if batch % self.backprop_every == (self.backprop_every - 1):
+                    if self.divide_recursive_grads:
+                        r = 1.0 * self.num_recurrences(src)
+                        for p in self.encoder.recurrent.parameters():
+                            p.grad /= (r - 1)
+                        for p in self.decoder.recurrent.parameters():
+                            p.grad /= (r - 1)
+                    
+                    optimizer.step()
+
+                _, predictions = decoded.data.max(dim=1)
+                err_rate = 100. * (predictions[mask] != tgt.data[mask]).sum() #/ mask.sum()
+                losses.append(loss.data[0])
+                errs.append(err_rate)
+                #logger.train_log(batch, {'loss': loss.data[0], 'acc': 100. - err_rate,},
+                #                 named_params=self.named_parameters)
+                logger.train_log(batch, {'loss': loss.data[0], 'err': err_rate,},
+                                 named_params=self.named_parameters, num_samples=mask.sum())
+
+        if scheduler is not None:
+            scheduler.step()
+            logger.lr = optimizer.param_groups[0]['lr']
 
         return losses, errs
 

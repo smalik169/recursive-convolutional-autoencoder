@@ -130,6 +130,10 @@ if model_class is models.VAEByteCNN:
             {'kl_increment_start': 4 * num_batches,
              'kl_increment': 0.25 / num_batches})
 # Overwrite with user's kwargs
+
+# XXX
+args.model_kwargs = args.model_kwargs.replace("norm=batch", "norm='batch'")
+
 model_kwargs.update(eval("dict(%s)" % (args.model_kwargs,)))
 model = model_class(**model_kwargs)
 
