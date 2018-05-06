@@ -122,6 +122,9 @@ def resume_training_innards(training_state, model, optimizer, scheduler):
         optimizer.param_groups[0]['lr'] = forced_args['lr']
         logger.lr = forced_args['lr']
 
+    if forced_args and forced_args.has_key('log_grads'):
+        logger.log_grads = forced_args['log_grads']
+
     first_epoch = logger.epoch + 1
 
     # Advance lr scheduler (it doesn't have load/save state_dict methods)

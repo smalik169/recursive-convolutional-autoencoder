@@ -82,6 +82,8 @@ parser.add_argument('--log-weights', action='store_true',
                     help="log weights' histograms")
 parser.add_argument('--log-grads', action='store_true',
                     help="log gradients' histograms")
+parser.add_argument('--clip', type=float, default=None,
+                    help='gradient clipping')
 args = parser.parse_args()
 
 
@@ -205,7 +207,8 @@ try:
         model.train_on(dataset.train.iter_epoch(args.batch_size),
                        optimizer,
                        None if args.lr_step_lambda is None else scheduler,
-                       logger)
+                       logger,
+                       clip=args.clip)
 
         if args.bn_lenwise_eval:
             val_loss = model.lengthwise_eval_on(args.batch_size, dataset.valid)

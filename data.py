@@ -238,17 +238,58 @@ class UTF8File(object):
         else:
             return batch
 
+    def maybe_pad_batch_from_inds(self, bsz, batch_inds):
+        batch = np.ones((bsz, 1024), dtype=np.uint8) * EMPTY
+        for j, (len_,ind_) in enumerate(batch_inds):
+            s = self.lines[len_][ind_]
+            if self.balance_fixedlen:
+                block_size = self.fixed_len // s.shape[1]
+                for k in range(s.shape[1]):
+                    batch[j, k*block_size] = s[0,k]
+            else:
+                batch[j,0:s.shape[1]] = s
+        return batch
+
     def iter_epoch(self, bsz, evaluation=False, len_=None):
         if evaluation:
-            for lines_len, data in self.lines.items():
-                if len_ and lines_len != len_:
-                    continue
-                for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
-                    batch = self.maybe_pad(batch)
+
+            if self.var_len_batch:
+                batch_inds = []
+                for lines_len in sorted(self.lines.keys()):
+                    data = self.lines[lines_len]
+
+                    if len_ and lines_len != len_:
+                        continue
+                    num_batches = data.shape[0]
+                    if num_batches == 0:
+                        continue
+
+                    all_inds = np.random.permutation(data.shape[0])
+                    all_inds = all_inds[:(bsz * num_batches)]
+                    batch_inds += [(lines_len,inds) \
+                                   for inds in np.split(all_inds, num_batches)]
+
+                # XXX
+                np.random.shuffle(batch_inds)
+                for i in xrange(0, len(batch_inds) // bsz * bsz, bsz):
+                    b_inds = batch_inds[i:(i+bsz)]
+                    lengths = (zip(*b_inds))[0]
+                    batch = self.maybe_pad_batch_from_inds(bsz, b_inds)
                     batch_tensor = torch.from_numpy(batch).long()
                     if self.cuda:
                         batch_tensor = batch_tensor.cuda()
-                    yield (batch_tensor, batch_tensor) #(source, target)
+                    yield (batch_tensor, batch_tensor, lengths) #(source, target)
+
+            else:
+                for lines_len, data in self.lines.items():
+                    if len_ and lines_len != len_:
+                        continue
+                    for batch in np.array_split(data, max(1, data.shape[0] // bsz)):
+                        batch = self.maybe_pad(batch)
+                        batch_tensor = torch.from_numpy(batch).long()
+                        if self.cuda:
+                            batch_tensor = batch_tensor.cuda()
+                        yield (batch_tensor, batch_tensor) #(source, target)
         else:
             batch_inds = []
             # for lines_len, data in self.lines.items():
@@ -281,15 +322,7 @@ class UTF8File(object):
                 for i in xrange(0, len(batch_inds) // bsz * bsz, bsz):
                     b_inds = batch_inds[i:(i+bsz)]
                     lengths = (zip(*b_inds))[0]
-                    batch = np.ones((bsz, 1024), dtype=np.uint8) * EMPTY
-                    for j, (len_,ind_) in enumerate(b_inds):
-                        s = self.lines[len_][ind_]
-                        if self.balance_fixedlen:
-                            block_size = self.fixed_len // s.shape[1]
-                            for k in range(s.shape[1]):
-                                batch[j, k*block_size] = s[0,k]
-                        else:
-                            batch[j,0:s.shape[1]] = s
+                    batch = self.maybe_pad_batch_from_inds(bsz, b_inds)
                     batch_tensor = torch.from_numpy(batch).long()
                     if self.cuda:
                         batch_tensor = batch_tensor.cuda()

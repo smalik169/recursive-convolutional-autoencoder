@@ -497,7 +497,7 @@ class ByteCNN(nn.Module):
         features = self.encoder(src, r_src)
         return self.decoder(features, r_tgt)
 
-    def train_on(self, batch_iterator, optimizer, scheduler=None, logger=None):
+    def train_on(self, batch_iterator, optimizer, scheduler=None, logger=None, clip=None):
         self.train()
         losses = []
         errs = []
@@ -536,6 +536,9 @@ class ByteCNN(nn.Module):
                                 p.grad /= (r - 1)
                             for p in self.decoder.recurrent.parameters():
                                 p.grad /= (r - 1)
+
+                        if clip:
+                            nn.utils.clip_grad_norm(self.parameters(), clip)
                         optimizer.step()
 
                     _, predictions = decoded.data.max(dim=1)
@@ -570,6 +573,8 @@ class ByteCNN(nn.Module):
                         for p in self.decoder.recurrent.parameters():
                             p.grad /= (r - 1)
                     
+                    if clip:
+                        nn.utils.clip_grad_norm(self.parameters(), clip)
                     optimizer.step()
 
                 _, predictions = decoded.data.max(dim=1)
@@ -598,7 +603,12 @@ class ByteCNN(nn.Module):
         samples = 0
         total_loss = 0
         batch_cnt = 0
-        for (src, tgt) in batch_iterator:
+
+        errs_by_len = np.zeros(11)
+        errs_by_len_samples = np.zeros(11)
+
+        for batch, batch_tuple in enumerate(batch_iterator):
+            src, tgt, lengths = (batch_tuple + (None,))[:3]
             src = Variable(src, volatile=True)
             tgt = Variable(tgt, volatile=True)
             decoded = self._encode_decode(src, tgt)
@@ -611,6 +621,21 @@ class ByteCNN(nn.Module):
             errs += (predictions[mask] != tgt.data[mask]).sum()
             samples += mask.sum()
             batch_cnt += 1
+
+            if lengths is not None:
+                # Update errors by length
+                for preds, tgts, m, l2 in zip(predictions, tgt.data, mask, lengths):
+                    e = (preds[m] != tgts[m]).sum()
+                    l = int(np.log2(l2))
+                    errs_by_len[l] += e
+                    errs_by_len_samples[l] += m.sum()
+
+        if errs_by_len.sum() > 0:
+            lengthwise_acc = {}
+            for l, (this_errs, this_samples) in enumerate(zip(errs_by_len, errs_by_len_samples)):
+                if this_samples > 0:
+                    lengthwise_acc[2**l] = str(int(100 - 100. * this_errs / this_samples)) + '%'
+            print(sorted(lengthwise_acc.items()))
         return {'loss': total_loss.data[0] / samples, #batch_cnt,
                 'acc': 100 - 100. * errs / samples}
 

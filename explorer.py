@@ -175,8 +175,9 @@ class Explorer(object):
 
     def analyze(self):
 
-        self.lenwise_validation_accuracy()
         self.validation_accuracy()
+        # self.lenwise_validation_accuracy()
+        # 
         # for l in [16, 32, 64, 128, 256, 512]:
         #     self.validation_accuracy(min_len=l, max_len=l)
         # self.integrated_gradients(aim='output', sent=long_sentences[8])
