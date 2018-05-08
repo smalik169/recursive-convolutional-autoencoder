@@ -199,17 +199,21 @@ class Residual(nn.Module):
 class ByteCNNEncoder(nn.Module):
     def __init__(self, n, emsize, vocab_size, normalization, padding_idx=None,
                  use_linear_layers=True, compress_channels=None,
-                 dropout=0.0, use_external_batch_norm=False, external_batch_max_r=None):
+                 dropout=0.0, use_external_batch_norm=False, external_batch_max_r=None,
+                 mod_r=2):
         super(ByteCNNEncoder, self).__init__()
         self.n = n
         self.emsize = emsize
+        self.mod_r = mod_r
+        self.latent_dim = emsize * int(2 ** self.mod_r)
         self.vocab_size = vocab_size
         self.external_batch_max_r = external_batch_max_r
         self.normalization = normalization
+        assert mod_r in [0, 1, 2], 'mod_r should be either 0, 1 or 2'
         assert n % 2 == 0, 'n should be a multiple of 2'
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
-        linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
+        linear_proto = lambda: nn.Linear(self.latent_dim, self.latent_dim)
         def residual_list(proto, k, normalization,
                           last_relu=True, dropout=0.0):
             res_list = [Residual(
@@ -273,7 +277,7 @@ class ByteCNNEncoder(nn.Module):
         x = self.prefix(x)
 
         assert self.external_batch_max_r is None or r <= self.external_batch_max_r
-        for rec_num in xrange(r-2):
+        for rec_num in xrange(r - self.mod_r):
             if not self.use_external_batch_norm:
                 x = self.recurrent(x)
             else:
@@ -303,18 +307,22 @@ class ByteCNNDecoder(nn.Module):
                  use_linear_layers=True, compress_channels=None,
                  output_embeddings_init=None,
                  use_external_batch_norm=False, external_batch_max_r=None,
-                 output_emb_tie_weights=True, expand_residual=False):
+                 output_emb_tie_weights=True, expand_residual=False,
+                 mod_r=2):
         super(ByteCNNDecoder, self).__init__()
         self.n = n
         self.emsize = emsize
+        self.mod_r = mod_r
+        self.latent_dim = emsize * int(2 ** self.mod_r)
         self.vocab_size = vocab_size
         self.external_batch_max_r = external_batch_max_r
         self.normalization = normalization
+        assert mod_r in [0, 1, 2], 'mod_r should be either 0, 1 or 2'
         assert n % 2 == 0, 'n should be a multiple of 2'
         conv_kwargs = dict(kernel_size=3, stride=1, padding=1, bias=False)
         conv_proto = lambda: nn.Conv1d(emsize, emsize, **conv_kwargs)
         expand_proto = lambda: ExpandConv1d(emsize, emsize*2, **conv_kwargs)
-        linear_proto = lambda: nn.Linear(emsize*4, emsize*4)
+        linear_proto = lambda: nn.Linear(self.latent_dim, self.latent_dim)
         residual_list = lambda proto, k, normalization, last_relu=True: [
                 Residual(proto, out_relu=(last_relu or i < k-1),
                          normalization=normalization)
@@ -379,17 +387,17 @@ class ByteCNNDecoder(nn.Module):
 
     def forward(self, x, r):
         if self.compress_channels:
-            x = x.view(x.size(0), self.compress_channels, 4)
+            x = x.view(x.size(0), self.compress_channels, int(2 ** self.mod_r))
             x = self.prefix(x)
         elif self.use_linear_layers:
             x = self.prefix(x)
-            x = x.view(x.size(0), self.emsize, 4)
+            x = x.view(x.size(0), self.emsize, int(2 ** self.mod_r))
         else:
             assert self.prefix is None
-            x = x.view(x.size(0), self.emsize, 4)
+            x = x.view(x.size(0), self.emsize, int(2 ** self.mod_r))
 
         assert self.external_batch_max_r is None or r <= self.external_batch_max_r
-        for rec_num in xrange(r-2):
+        for rec_num in xrange(r - self.mod_r):
             if not self.use_external_batch_norm:
                 x = self.recurrent(x)
             else:
@@ -421,7 +429,8 @@ class ByteCNN(nn.Module):
             use_external_batch_norm=False, external_batch_max_r=None,
             divide_recursive_grads=False, 
             output_emb_tie_weights=True,
-            expand_residual=False, backprop_every=1, sub_batchsize=None):
+            expand_residual=False, backprop_every=1, sub_batchsize=None,
+            mod_r=2):
         super(ByteCNN, self).__init__()
         self.n = n
         self.emsize = emsize
@@ -434,7 +443,8 @@ class ByteCNN(nn.Module):
                 compress_channels=compress_channels,
                 dropout=dropout,
                 use_external_batch_norm=use_external_batch_norm,
-                external_batch_max_r=external_batch_max_r)
+                external_batch_max_r=external_batch_max_r,
+                mod_r=mod_r)
 
         self.decoder = ByteCNNDecoder(n, emsize, vocab_size,
                 normalization=decoder_norm,
@@ -443,7 +453,8 @@ class ByteCNN(nn.Module):
                 output_embeddings_init=(self.encoder.embedding if use_output_embeddings else None),
                 use_external_batch_norm=use_external_batch_norm, external_batch_max_r=external_batch_max_r,
                 output_emb_tie_weights=output_emb_tie_weights,
-                expand_residual=expand_residual)
+                expand_residual=expand_residual,
+                mod_r=mod_r)
 
         self.log_softmax = nn.LogSoftmax()
         self.criterion = nn.CrossEntropyLoss(ignore_index=ignore_index, size_average=False)
