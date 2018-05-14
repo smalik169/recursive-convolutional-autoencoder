@@ -85,7 +85,8 @@ parser.add_argument('--log-grads', action='store_true',
 parser.add_argument('--clip', type=float, default=None,
                     help='gradient clipping')
 args = parser.parse_args()
-
+print(args)
+print()
 
 ###############################################################################
 # Resume old training?

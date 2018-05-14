@@ -549,7 +549,7 @@ class ByteCNN(nn.Module):
                                 p.grad /= (r - 1)
 
                         if clip:
-                            nn.utils.clip_grad_norm(self.parameters(), clip)
+                            total_norm = nn.utils.clip_grad_norm(self.parameters(), clip)
                         optimizer.step()
 
                     _, predictions = decoded.data.max(dim=1)
@@ -583,9 +583,9 @@ class ByteCNN(nn.Module):
                             p.grad /= (r - 1)
                         for p in self.decoder.recurrent.parameters():
                             p.grad /= (r - 1)
-                    
+
                     if clip:
-                        nn.utils.clip_grad_norm(self.parameters(), clip)
+                        total_norm = nn.utils.clip_grad_norm(self.parameters(), clip)
                     optimizer.step()
 
                 _, predictions = decoded.data.max(dim=1)
