@@ -506,3 +506,54 @@ class Explorer(object):
         for s in samples:
             print(repr(''.join(s).decode('utf-8')))
         print()
+
+    def sentence_evaluation(self):
+        # Set PATHs
+        PATH_TO_SENTEVAL = '/pio/scratch/2/i264266/sentence-embeddings/SentEval'
+        PATH_TO_DATA = '/pio/data/data/bytecnn/sentence_encoding_data/senteval_data/downstream/senteval_data/'
+
+        # import SentEval
+        sys.path.insert(0, PATH_TO_SENTEVAL)
+        import senteval
+
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        def prepare(params, samples):
+            return
+
+        def batcher(params, batch):
+            #batch = [str(' '.join(sent), errors="ignore") if sent != [] else '.' for sent in batch]
+            batch = [' '.join(sent) if sent != [] else '.' for sent in batch]
+            embeddings = []
+
+            for sent in batch:
+                self.model.eval()
+                src, _ = self.dataset.valid.sample_batch(1, sent, verbose=False).next()
+                src = Variable(src, volatile=True, requires_grad=False)
+                r_src = self.model.num_recurrences(src)
+                sentvec = self.model.encoder(src, r_src).data.cpu().numpy()
+
+                embeddings.append(sentvec)
+
+            embeddings = np.vstack(embeddings)
+            return embeddings
+
+
+        # Set params for SentEval
+        params_senteval = {'task_path': PATH_TO_DATA, 'usepytorch': True, 'kfold': 5}
+        params_senteval['classifier'] = {'nhid': 0, 'optim': 'rmsprop', 'batch_size': 128,
+                                         'tenacity': 3, 'epoch_size': 2}
+
+        # Set up logger
+        logging.basicConfig(format='%(asctime)s : %(message)s', level=logging.DEBUG)
+
+        se = senteval.engine.SE(params_senteval, batcher, prepare)
+        transfer_tasks = ['CR', 'MR', 'MPQA', 'SUBJ', 'SST2', 'SST5', 'TREC', 'MRPC',
+                          'SICKRelatedness', 'SICKEntailment', 'STSBenchmark',
+                          'SNLI', 'ImageCaptionRetrieval', 'STS12', 'STS13',
+                          'STS14', 'STS15', 'STS16']
+        results = se.eval(transfer_tasks)
+        print(results)
+        print()
+
