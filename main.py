@@ -84,6 +84,8 @@ parser.add_argument('--log-grads', action='store_true',
                     help="log gradients' histograms")
 parser.add_argument('--clip', type=float, default=None,
                     help='gradient clipping')
+parser.add_argument('--eval-first', action='store_true',
+                    help='evaluate model before training')
 args = parser.parse_args()
 print(args)
 print()
@@ -202,14 +204,15 @@ if explorer_mode:
 
 # At any point you can hit Ctrl + C to break out of training early.
 try:
-    for epoch in range(first_epoch, args.epochs+1):
+    for epoch in range(first_epoch - args.eval_first, args.epochs+1):
         logger.mark_epoch_start(epoch)
 
-        model.train_on(dataset.train.iter_epoch(args.batch_size),
-                       optimizer,
-                       None if args.lr_step_lambda is None else scheduler,
-                       logger,
-                       clip=args.clip)
+        if epoch >= first_epoch:
+            model.train_on(dataset.train.iter_epoch(args.batch_size),
+                           optimizer,
+                           None if args.lr_step_lambda is None else scheduler,
+                           logger,
+                           clip=args.clip)
 
         if args.bn_lenwise_eval:
             val_loss = model.lengthwise_eval_on(args.batch_size, dataset.valid)

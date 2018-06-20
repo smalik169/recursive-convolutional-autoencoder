@@ -16,6 +16,7 @@ python main.py \
     --data /pio/data/data/bytecnn/xiang-11M/xiang. \
     --data-kwargs="random_lines_per_epoch=1000000,fixed_len=1024,balance_fixedlen=True,var_len_batch=True" \
     --batch-size=32 \
+    --eval-first \
     --optimizer-kwargs="momentum=0.5"
 
 #    --log-interval 1

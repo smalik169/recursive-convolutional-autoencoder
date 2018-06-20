@@ -303,7 +303,7 @@ class Logger(object):
         for field, (name, kwargs) in classes_with_kwargs.items():
             info += "%s_class=%s\n" % (field, name)
             if kwargs:
-                info += "%s_kwargs=%s\n" % (field, kwargs_to_str(kwargs)) 
+                info += "%s_kwargs=%s\n" % (field, kwargs_to_str(kwargs))
 
         with open(self.logdir+"model.info", 'w') as f:
             f.write(info.strip())
@@ -338,7 +338,7 @@ class Logger(object):
                  for k in sorted(cur_loss.keys())])
             print('| epoch {:3d} | logdir {} | {:5d}/{:5d} batches | lr {:02.5f} | '
                   'ms/batch {:5.2f} | {}'.format(
-                    self.epoch, self.logdir.replace('/', '')[-16:], 
+                    self.epoch, self.logdir.replace('/', '')[-16:],
                     batch, self.num_batches, self.lr,
                     elapsed, loss_str))
 

@@ -8,6 +8,7 @@ from collections import defaultdict
 from itertools import chain
 
 import numpy as np
+from nltk.tokenize import word_tokenize
 
 import torch
 import torch.nn as nn
@@ -302,7 +303,7 @@ class UTF8File(object):
                     num_batches = data.shape[0]
                 else:
                     num_batches = data.shape[0] // bsz
-                
+
                 # num_batches = data.shape[0] // bsz
                 if num_batches == 0:
                     continue
