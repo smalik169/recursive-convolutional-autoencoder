@@ -1,10 +1,11 @@
-# Recursive convolutional autoencoder
+# Code under refactor
+## Source code for models used in our paper: *Efficient Purely Convolutional Text Encoding*
 
-# References
+## References
 1. https://arxiv.org/abs/1802.01817
 2. https://arxiv.org/abs/1708.04729
 
-## Explorer
+### Explorer
 
 ```
 python explorer.py --resume-training <exp-dir>
